@@ -104,19 +104,38 @@ while [ $n -lt 20 ]; do
 done
 echo "[$(date +%T)] phase1 done ($n 轮双杀)"
 
-# 阶段2: 稀疏兜底。20 分钟、每 30 秒一次（共 40 次）。
-#   数据来源（八次重启）: openid 被唤醒的时刻是 T+3.9 / 3.9 / 3.95 / **12.3** 分钟
-#   —— 第四次（08 次重启）晚了整整 8 分钟，说明这个时机不是固定值，
-#   跟负一屏/OTA 界面被拉起的节奏有关，会随手机会话而变化。
+# 阶段2: 稀疏兜底，跑到「开机后 PHASE2_END 秒」为止，每 30 秒巡检一次。
+#   数据来源（十次重启）: openid 被唤醒的时刻（从开机算）是
+#     T+3.9 / 3.9 / 3.95 / 12.3 分钟，以及第 17 次实测的 T+19min45s 与 T+32min02s。
 #   两次教训:
 #     ① 砍到 5 分钟会直接漏掉 T+12min 那种情况 -> 窗口必须比已观测值宽。
 #     ② 稀疏到 60 秒代价太大: 那一轮 openid 存活了 80 秒（15 秒档只有 3.4~6.8 秒）。
-#   所以选 30 秒档: 活口上限 30 秒，总窗口覆盖到 T+25 分钟，Termux 常驻约 25 分钟。
+#   所以选 30 秒档。
+#
+# 【v3 关键改动，2026-11-14 夜】窗口锚点从「脚本启动」改成「开机时刻」
+#   旧版是固定 40 轮 = 20 分钟，而脚本起点会漂移：实测最快开机后 2 秒拿到 shell，
+#   最慢 469 秒（Shizuku 没自启，人工点「启动」后才通）。于是"总窗口"实际是
+#   漂移的，第 17 次就是因为白等了 8 分钟才勉强接住 T+32min 那次复活——是运气不是设计。
+#   现在改成读 /proc/uptime，跑到开机后 PHASE2_END 秒为止，与漂移无关：
+#     若脚本在 T+2s 起来 -> 阶段2 跑约 35 分钟；
+#     若在 T+469s 起来 -> 约 32 分钟；若已过 PHASE2_END，则阶段2 直接跳过。
+#   选 2400（T+40min）的理由: 最大已观测复活是 T+32min02s，留 8 分钟余量。
+PHASE2_END=2400
 m=0
-while [ $m -lt 40 ]; do
+while :; do
+  NOW=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+  case "$NOW" in ''|*[!0-9]*) NOW=0 ;; esac
+  if [ "$NOW" -ge "$PHASE2_END" ]; then
+    echo "[$(date +%T)] phase2 到点退出 (uptime ${NOW}s >= ${PHASE2_END}s)"
+    break
+  fi
+  if [ $m -ge 80 ]; then
+    echo "[$(date +%T)] phase2 触到安全上限 80 轮 (uptime ${NOW}s)"
+    break
+  fi
   sleep 30
   if [ -n "$(rish -c 'pidof com.heytap.openid')" ]; then
-    echo "[$(date +%T)] 复活，再双杀"
+    echo "[$(date +%T)] 复活，再双杀 (uptime ${NOW}s)"
     rish -c "$KILL" >/dev/null 2>&1
   fi
   m=$((m+1))
