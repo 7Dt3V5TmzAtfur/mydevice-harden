@@ -460,9 +460,85 @@ pm install-commit <sid>  ──挂死──>
 | `am start -n .../.PackageInstallerActivity` | `not exported from uid 10141` |
 | `appops set com.android.shell REQUEST_INSTALL_PACKAGES allow` | shell 无 `MANAGE_APP_OPS_MODES` |
 
-**结论：这台机器在没有 root 的前提下装不了 APK，只能人工在手机上点开文件安装。**
+**当时的结论：这台机器在没有 root 的前提下装不了 APK，只能人工在手机上点开文件安装。**
 （`/sdcard/Download/` 放好 apk，用「文件管理」点开即可——那条路的调用方是文件管理器，
 不是 shell，能过来源校验。）
+
+> ⚠️ **此结论已于 2026-11-14 晚被推翻**，见坑⑲。真正的原因是 ColorOS 的「权限监控」
+> 在拦，不是那个编译期特性。关掉权限监控后 `pm install` 直接 `Success`，
+> 上面 9 条旁路一条都不需要。
+
+---
+
+### ⑲ 真正的总闸门：ColorOS 16 把「权限监控」藏进了英文界面
+
+这是本机所有怪现象（adb 装不了 APK、Shizuku 报 adb 权限受限、部分 `pm` 操作被静默拒绝）
+的**同一个根因**，也是本轮最大的发现。
+
+**症状**：Shizuku 服务端起来了（`shizuku_server` 在跑），界面却报红：
+
+```
+您需要进行额外的步骤
+您的设备制造商限制了 adb 的权限，使用 Shizuku 的应用无法正常工作。
+通常，在"开发者选项"中调整一些选项即可解除此限制。
+```
+
+Shizuku 官方 FAQ 对 ColorOS 的说法是「在开发者选项里关闭『权限监控』」。
+**但本机（Android 16 / ColorOS 16.1 / `PYC110_16.0.9.409`）的开发者选项里根本没有这一项**
+——我把整页从顶翻到底逐条 dump 过，`调试` 段只有：USB 调试 / 撤消授权 / 无线调试 /
+停用 adb 授权超时 / 视图属性检查 / 选择调试应用 / 等待调试程序 / 通过 USB 验证应用 /
+验证可调试应用的字节码 / 日志缓冲区 / 功能标记 …，**没有「权限监控」，也没有任何同义项**。
+
+**社区解法**（CSDN + 金舟，两个独立来源一致）：ColorOS 16 **隐藏了该项但没删**，
+中文界面看不到，切英文后会以 **`Disable system optimization`** 的名字出现在开发者选项。
+
+**更轻的落地方式**（不用改系统语言，只改 Settings 一个应用）：
+
+```bash
+# Android 13+ 支持 per-app locale，只让「设置」用英文渲染
+adb shell cmd locale set-app-locales com.android.settings --user 0 --locales en-US
+adb shell am force-stop com.android.settings
+adb shell am start -a android.settings.APPLICATION_DEVELOPMENT_SETTINGS
+# 英文界面下翻到底部 → "Disable system optimization" → 打开 → 确认框点 "Turn on anyway"
+# 完事后恢复中文
+adb shell cmd locale set-app-locales com.android.settings --user 0 --locales zh-CN
+```
+
+开关本身的位置与文案：
+
+| 项 | 值 |
+|---|---|
+| 英文名 | `Disable system optimization` |
+| 摘要 | `Turning this on may increase background power usage.` |
+| 确认框标题 | `Proceed with caution` |
+| 三条警告 | Increased power consumption / System features may be affected / Reduced security protection |
+| 确认按钮 | `Turn on anyway` |
+| 中文界面 | 该行**不显示**（状态保留，切回中文也生效） |
+
+**开了之后立刻发生的变化（实测）**：
+
+| 动作 | 开之前 | 开之后 |
+|---|---|---|
+| `pm install -r /data/local/tmp/hail.apk` | 永久挂死无输出 | **`Success`** |
+| `pm install -r .../shizuku.apk` | 同上 | **`Success`** |
+| 拦截器日志 | 停在 `installStage send adb install` | `installStage send adb replace install, **silent**`（放行） |
+| Shizuku 界面 | 红字「adb 权限受限」，版本显示错误的 13.0 | 「正在运行 版本 13.5, adb」，红字消失 |
+| `pm disable-user com.oplus.ota` | `new state: default` | 仍 `default`（**这条没解**，属另一套保护名单） |
+
+→ 坑⑱ 里那 9 条安装旁路**全部不需要了**。根因从来不是编译期特性，是运行期的权限监控。
+
+**它的状态存哪**：不在 `settings` 的 global/secure/system 三张表里（开启前后做了全量 diff，
+只有时间戳类字段变化），和坑⑱ 挖到的 `/data/oplus/os/config/adb_installer_status.xml` 同处，
+`/data/oplus/os/config/` 对 shell 是 `Permission denied`。所以想脚本化只能靠上面的 UI 操作，
+或者日后拿到 root 再直接写文件。
+
+**副作用与回滚**：ColorOS 部分系统界面会变成原生安卓样式，耗电略增，安全防护降低。
+回滚就是把 `Disable system optimization` 关掉（同样需要英文界面才能看到）。
+社区与实测都确认**状态跨重启保留**。
+
+> 雷区提醒：不要因为"反正都关了"就去动 `com.oplus.safecenter` / `com.coloros.securityguard`
+> ——安全中心在 Android 15+ 冻结后会异常；`com.oplus.subsys` / `com.oplus.appplatform` /
+> `com.oplus.athena` / `com.oplus.customize.coreapp` 更是整机级地雷（见坑⑯）。
 
 ---
 
@@ -785,13 +861,22 @@ pm disable-user --user 0 com.oplus.sauhelper
 
 ### 待人工完成的一步
 
-两个 APK 已在手机 `/sdcard/Download/`：`shizuku.apk`（2.46 MB, v13.6.0）、`hail.apk`（5.49 MB, v1.11.0）。
-用「文件管理 → 下载」点开安装即可——这条路的调用方是文件管理器而非 shell，能过来源校验。
-装好后 Shizuku 用 adb 启动一次：
+> ✅ 已于 2026-11-14 晚完成，且发现**根本不需要人工点安装** —— 关掉权限监控后
+> `pm install` 直接可用（坑⑲），两个 APK 都是 adb 装进去的。
 
+装好后 Shizuku 用 adb 启动一次。**注意：Shizuku 13.x 已经没有 `start.sh` 了**，
+老教程那句 `adb shell sh /sdcard/Android/data/.../start.sh` 会报文件不存在。正确做法是直接
+执行 APK 里的原生库（App 里「查看指令」弹窗给出的就是这条）：
+
+```bash
+# 路径用 pm path 现取，别抄死（hash 段每次安装都会变）
+adb shell "pm path moe.shizuku.privileged.api"
+# package:/data/app/~~AICAWYv43VYxogViPKuoXg==/moe.shizuku.privileged.api-CZsXIkjrxQVq_aCryPYR2g==/base.apk
+adb shell "/data/app/~~AICAWYv43VYxogViPKuoXg==/moe.shizuku.privileged.api-CZsXIkjrxQVq_aCryPYR2g==/lib/arm64/libshizuku.so"
+# info: killing old process...  /  info: shizuku_server pid is 8227  /  exit with 0
 ```
-adb shell sh /sdcard/Android/data/moe.shizuku.privileged.api/start.sh
-```
+
+判据：`ps -A | grep shizuku_server` 出现 `shell <pid> 1 ... shizuku_server`（PPID=1 表示已 daemon 化）。
 
 注意：因本机拿不到 root，Shizuku **只能用 ADB 模式**（这也是它的常规形态），root 模式不可用。
 
@@ -799,3 +884,144 @@ adb shell sh /sdcard/Android/data/moe.shizuku.privileged.api/start.sh
 
 `axml.py`（自写 AXML 解析，读 APK 清单里的 provider/authority/authorities）、
 `scanjar.py`（在 `services.jar` / `oplus-services.jar` 里按字符串定位 OPPO 定制类与常量）。
+
+---
+
+## 附三：Shizuku / Hail 配置与第二轮屏蔽（2026-11-14 晚）
+
+目标：把「临时 root 管理工具链」真正跑通，并按社区清单做第二轮云控/广告/OTA 清理。
+
+### 1. 四件事完成度
+
+| # | 事项 | 结果 |
+|---|---|---|
+| ① | 装 Shizuku / Hail | ✅ v13.6.0 / v1.11.0，已用 `pm install` 装上（见坑⑲） |
+| ② | 让 Shizuku 真正可用 | ✅ 关掉 `Disable system optimization` 后红字消失，版本显示 13.5 |
+| ③ | Hail 绑定 Shizuku | ✅ 工作模式 = `Shizuku - 停用`，授权弹窗点「始终允许」 |
+| ④ | 端到端验证 | ✅ 冻结计算器 → `enabled=3`；解冻 → `enabled=1`；`pm default-state` 复位 → `enabled=0` |
+
+### 2. Shizuku 的几个坑
+
+- **13.x 不再有 `start.sh`**，改为直接执行 `lib/arm64/libshizuku.so`（见上）。
+- 用截屏 OCR 抄路径会把 hash 段抄错（`CZsXlk-jrQxQv` vs 真实 `CZsXIkjrxQVq`），
+  报错形如 `inaccessible or not found`。**一律用 `pm path` 现取。**
+- 服务端启动后界面**版本号可能显示错误**（曾显示 13.0 并提示"再次启动来升级到 13.5"）。
+  这是权限受限时的降级表现；把权限监控关掉再重启服务端，版本立刻变回 13.5。
+- `service list | grep shizuku` 返回空是**正常**的——Shizuku 不注册系统 service。
+- 每次**重启手机后都要重新执行一次** `libshizuku.so`（ADB 模式的固有代价）。
+
+### 3. Hail 的操作逻辑（第一次用会懵）
+
+Hail 不是"点一下就冻结"，是两步：
+
+```
+「应用」页 → 勾选右侧复选框（加入工作台）
+    ↓
+「首页」→ 条目单击 = 启动应用；真正冻结在右上角 ⋮ 菜单：
+   冻结可见 / 解冻可见 / 全部冻结 / 全部解冻 / 冻结非白名单 / 导入应用 / 导出到剪切板
+```
+
+- 「冻结可见」= 只处理当前屏可见的条目，做单点测试最安全（别手滑点「全部冻结」）。
+- 工作模式里的四个 Shizuku 选项含义：`强行停止`(force-stop) / `停用`(disable-user) /
+  `隐藏`(hide) / `暂停`(suspend)。**选「停用」**，和 adb 的 `pm disable-user` 等价、最彻底。
+- `pm suspend`/`pm disable` 那条路上被硬保护的包，Hail 一样会失败（同一个 system_server 检查）。
+- 顺便记一个操作坑：**开着输入法时 `adbd` 的点击会落到键盘上**，看着"点了没反应"，
+  其实点在了「语音转文字」面板上。点列表前先 `input keyevent KEYCODE_BACK` 收键盘。
+- `adb shell input text` **不支持中文**（`NullPointerException: length of null array`），
+  所以 Hail 的搜索框只能输入 ASCII；按中文名找应用得靠滚动。
+
+### 4. 第二轮屏蔽结果
+
+新增 **disabled-user（16 个）**：
+
+```
+com.android.virtualization.terminal   com.coloros.digitalwellbeing   com.heytap.cloud
+com.heytap.speechassist               com.oplus.logtrial             com.oplus.metis
+com.oplus.nas                         com.oplus.nhs                  com.oplus.obrain
+com.oplus.onetrace                    com.oplus.ovoicemanager        com.oplus.ovoicemanager.wakeup
+com.oplus.qualityprotect              com.oplus.sauhelper            com.oplus.stdsp
+com.oplus.thirdkit                    com.oplus.vdc
+```
+
+新增 **suspended（13 个，`disable-user` 被拒后降级成功）**：
+
+```
+com.heytap.browser        com.heytap.market      com.heytap.quicksearchbox
+com.oplus.themestore      com.oplus.pantanal.ums com.heytap.pictorial
+com.nearme.instant.platform  com.heytap.tas      com.heytap.openid
+com.heytap.htms           com.oplus.romupdate    com.oplus.cota
+com.opos.ads
+```
+
+`com.oplus.nas` 与 `com.oplus.nhs` **必须成对处理**（社区警告，单动一个会炸），本次两个一起禁用后
+WiFi/移动网络实测正常（`ping 223.5.5.5` 0% loss，`dumpsys connectivity` 默认网络仍为 WIFI）。
+
+**故意没动的**：`com.heytap.colorfulengine`（桌面/锁屏动态引擎，动它可能坏壁纸与小组件）、
+`com.heytap.music` / `com.coloros.video`（有广告但是功能应用，留给用户自己决定）、
+`com.heytap.accessory` / `com.heytap.mydevices`（配件与设备管理）、`com.heytap.mcs`（推送通道）。
+
+### 5. OTA：包级无解，但可以把引擎废掉
+
+`com.oplus.ota` / `com.oplus.sau` / `com.oplus.olc` 四路全拒，且报错暴露了保护机制的真实位置：
+
+| 手法 | 结果 |
+|---|---|
+| `pm disable-user --user 0` | `new state: default`（静默拒绝） |
+| `pm suspend --user 0` | `new suspended state: false` |
+| `pm uninstall --user 0` | `Failure [DELETE_FAILED_INTERNAL_ERROR]` |
+| `pm disable --user 0 com.oplus.ota/.service.OTAService` | `SecurityException: Shell cannot change component state ... to 2` |
+| `pm hide --user 0` | `SecurityException: Access denied, requires: android.permission.MANAGE_USERS` |
+| `cmd appops set <pkg> RUN_IN_BACKGROUND ignore` | ✅ 成功 |
+| `cmd deviceidle whitelist -<pkg>` | ✅ `Removed:` |
+
+关键结论：**组件级 `pm disable` 也会被拦**，而且抛的是 `SecurityException` 而不是静默 `default`
+——说明 OTA 三包在 system_server 里有一张显式保护名单，连"改组件状态"这个更细的入口都堵了。
+
+所以 OTA 走"绕"而不是"关"：
+
+```bash
+# 引擎已挂起（真正的下载/刷写在这里）
+pm suspend --user 0 com.oplus.romupdate
+pm suspend --user 0 com.oplus.cota          # 已 uninstall，如恢复则一并 suspend
+
+# 三个硬保护包：禁后台 + 踢出 doze 白名单，让它检查不了、也活不下来
+for p in com.oplus.ota com.oplus.sau com.oplus.olc; do
+  cmd appops set $p RUN_IN_BACKGROUND ignore
+  cmd deviceidle whitelist -$p
+done
+```
+
+另外这两项本来就已经是关的（`settings get global` 确认）：
+
+```
+ota_disable_automatic_update=1
+can_update_at_night=0
+```
+
+### 6. 本轮健康检查（全部通过）
+
+```
+SystemUI pid   : 28576（两次采样同一 PID，0 崩溃）
+FATAL EXCEPTION: 0 条（近 300 行日志）
+网络           : ping 223.5.5.5 → 0% packet loss
+Shizuku        : shizuku_server pid 8227, user shell, PPID 1
+安装通道       : pm install -r hail.apk → Success
+```
+
+### 7. 完整回滚
+
+```bash
+# 解冻（Hail 冻的 / adb 禁的都能用这两条还原）
+pm enable --user 0 <pkg>
+pm default-state --user 0 <pkg>
+
+# 解除挂起
+pm unsuspend --user 0 <pkg>
+
+# 恢复后台限制
+cmd appops set <pkg> RUN_IN_BACKGROUND default
+cmd deviceidle whitelist +<pkg>
+
+# 恢复已卸载的（保留 enabled 状态，恢复后可能还要 pm enable）
+pm install-existing --user 0 <pkg>
+```
