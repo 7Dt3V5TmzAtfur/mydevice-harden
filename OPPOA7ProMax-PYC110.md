@@ -1287,3 +1287,33 @@ pm grant com.heytap.tas android.permission.ACCESS_BACKGROUND_LOCATION
 settings put secure com.oplus.ota.detected_status 1
 settings put secure com.oplus.ota.starting_line 1794630228227
 ```
+
+### 8. 误伤修复：软件商店 `com.heytap.market` 被挂起（已恢复）
+
+**症状**：桌面图标整个消失，不是报错、不是打不开，是**找不到**。
+
+**根因**：它在第二轮屏蔽里被 `pm suspend` 了（挂起），不是被卸载。
+挂起（suspended）在系统里的表现就是：包还在、`installed=true`，但**启动器把图标藏起来**，
+点任何入口都会被拦。所以「卸载了」和「挂起了」在用户视角长得一模一样。
+
+**判断方法**（一条就看出来）：
+
+```bash
+adb shell "dumpsys package com.heytap.market" | grep -m1 "enabled="
+# 挂起：suspended=true  enabled=0（默认态）
+# 卸载：installed=false，且 pm list packages 里根本不出现
+# 禁用：suspended=false enabled=3（disabled-user）
+```
+
+**恢复**：
+
+```bash
+pm unsuspend --user 0 com.heytap.market   # → new suspended state: false
+pm default-state --user 0 com.heytap.market  # → enabled=0（真正出厂态，不是 enabled=1）
+```
+
+复核 `suspended=false enabled=0` 后，图标自动回到桌面第 2 页，点开正常加载首页。
+
+**教训**：`pm suspend` 的杀伤力和 `pm uninstall` 在用户感知上是等价的（都不见了），
+但恢复成本差别很大——挂起只要一条 `unsuspend`，卸载要 `install-existing`。
+所以批量屏蔽预装应用时，**对用户可能真要用到的功能应用（商店、文件管理、天气）宁可用「限后台」也别用 suspend**。
