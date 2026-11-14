@@ -1002,6 +1002,49 @@ ota_disable_automatic_update=1
 can_update_at_night=0
 ```
 
+#### 复查（2026-11-14 19:55）：为什么「系统更新」一直还在
+
+被问过一次「系统的更新为什么一直都存在，没停用/卸载/屏蔽掉」，于是逐包重测了一遍。结论是：**三个 OTA 包的抵抗力完全不同，最硬的那一个恰好是入口本身。**
+
+| 包 | 现状（重测） | 能做什么 |
+|---|---|---|
+| `com.oplus.cota`（下载客户端） | `installed=false` + `suspended=true` | ✅ 早就卸掉了 |
+| `com.oplus.romupdate`（ROM 校验） | `installed=true suspended=true` | ⚠️ 挂住了，但开机仍被 `com.oplus.athena` 经 `RomUpdateProvider` 拉活（进程 11837） |
+| `com.oplus.ota`（**设置里的「软件更新」入口**） | `installed=true enabled=0 suspended=false` | ❌ 四种动词全拒，见下 |
+
+```
+pm disable-user --user 0 com.oplus.ota                          → new state: default
+pm suspend --user 0 com.oplus.ota                               → new suspended state: false
+pm uninstall --user 0 com.oplus.ota                             → Failure [DELETE_FAILED_INTERNAL_ERROR]
+pm disable --user 0 com.oplus.ota/com.oplus.otaui.activity.EntryActivity
+                                                                → SecurityException: Shell cannot change component state ... to 2
+```
+
+**而且它不只是「存在」，还会自己跑到前台。** 08 次重启（19:35:06）的日志里，开机 3 分钟后它被系统恢复成前台任务：
+
+```
+19:38:14.309 wm_create_activity: [0,266322935,1483,
+             com.oplus.ota/com.oplus.otaui.activity.EntryActivity,
+             com.oplus.ota.MAIN, NULL, NULL, 268435456]
+19:38:14.332 am_proc_start: [0,10013,10256,com.oplus.ota:ui,next-top-activity,
+             {com.oplus.ota/...EntryActivity}, NULL]
+19:45:10.445 同一套再来一遍
+```
+
+`dumpsys activity recents` 里它是 `Recent #0`，intent 带 `mCallingUid=1000` 与 `id=message_entry_source_settings`，`mLastFocusedRootTask` 也指向它——**是上次留下的任务被系统恢复，不是它自己重新联网检测**。所以你看到的「一直都在」，很大概率是它还留在最近任务里，开机后又被拎回前台。
+
+已经压住的部分：OTA 通知（`dumpsys notification` 里没有 `pkg=com.oplus.ota` 的记录）、自动更新开关、Opex 标志。
+
+还能做的三件事（都不需要 root）：
+
+| 手段 | 效果 | 代价 |
+|---|---|---|
+| `am force-stop com.oplus.ota` | 实测有效，`pidof` 立刻为空 | 下次再从设置点进去还会起来 |
+| 清掉残留任务，避免开机恢复 | 从源头断掉「自己跑到前台」 | 只是清任务，不动程序 |
+| Private DNS 指向过滤型解析器，屏蔽 OTA 域名 | 真正意义上的「屏蔽」，移动网络也生效 | 需要信任一个第三方 DoT 解析器，会接管整机 DNS 查询 |
+
+`pm hide` / 组件禁用 / 卸载 / 挂起 这四条路，对 `com.oplus.ota` 是确定走不通的——它和 `com.heytap.openid`、`com.oplus.olc` 属于同一档的硬保护。
+
 ### 6. 本轮健康检查（全部通过）
 
 ```
