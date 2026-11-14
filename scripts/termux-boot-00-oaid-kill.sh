@@ -25,6 +25,21 @@
 #   5) 09 次重启还抓到两条新边: instant 的 InstantProvider 被 com.oplus.notificationmanager
 #      拉起（不经过负一屏）；openid 被 com.heytap.pictorial 拉起（新调用方）。
 # 因此击杀名单固定为两个: openid + instant.platform。
+#
+# 【v2 变更，2026-11-14 夜，第 16 次重启实验】加 wakelock 试图活过 T+115 秒
+#   第 10~15 次重启（21:10 / 21:14 / 21:20 / 21:37 / 21:43）里本脚本全部只跑到
+#   「rish ready」就被 ColorOS 在 T+113~115 秒干掉，phase1 一次都没写完：
+#     11-14 21:45:40 I am_kill: [0,10095,com.termux,200,stop com.termux due to o-stop(35),...]
+#   而 18:52~19:59 那六次全部跑完 phase1。两者差异排除了这些：
+#     - 不是冻结器（cached_apps_freezer=null 时照样被杀，见附八 §5）
+#     - 不是自启动拦截（BootCompleteReceiver 每轮都在 LOCKED_BOOT_COMPLETED 就被拉起）
+#     - 不是 standby bucket（实测 am get-standby-bucket = 10 = ACTIVE）
+#     - 不是残留的「完全允许后台行为」（第 15 次已改回智能优化，boot_clear 标记消失，
+#       但 force-stop 照旧，且 dumpsys 显示 com.termux stopped=true）
+#   剩下的解释是它当时是 cached 进程。所以本轮用 termux-wake-lock 把 TermuxService
+#   抬成前台服务（常驻通知），看 adj 能不能躲过这一刀。成则阶段2 可跑，败则阶段2
+#   在本机无 root 下结构性不可实现。
+#   注意: 必须在等 rish 之前就加锁 —— 那一刀就落在 T+115 秒，等 rish 可能已经来不及。
 # 2026-11-14
 H=/data/data/com.termux/files/home
 LOG=$H/boot-oaid.log
@@ -32,6 +47,12 @@ exec >>"$LOG" 2>&1
 echo "===== $(date '+%F %T') boot ====="
 export RISH_APPLICATION_ID=com.termux
 export PATH=$H:$PATH
+
+# 第一件事就是抢 wakelock：ColorOS 的清扫落在 T+113~115 秒，比抢锁晚就白搭。
+# termux-wake-lock -> am startservice -a com.termux.service_wake_lock
+#   -> TermuxService.setWakeLock(true) -> PARTIAL_WAKE_LOCK + 常驻通知 -> 前台服务 adj
+termux-wake-lock 2>/dev/null
+echo "[$(date +%T)] wakelock requested (rc=$?)"
 
 KILL="am force-stop com.heytap.openid; am force-stop com.nearme.instant.platform"
 
@@ -76,7 +97,10 @@ rish -c "$KILL" >/dev/null 2>&1
 n=0
 while [ $n -lt 20 ]; do
   rish -c "$KILL" >/dev/null 2>&1
-  n=$((n+1)); sleep 15
+  n=$((n+1))
+  # 每 5 轮留一个进度点：被杀在哪一轮、还是压根没跑，一眼能分开
+  case $n in 5|10|15) echo "[$(date +%T)] phase1 进度 $n/20" ;; esac
+  sleep 15
 done
 echo "[$(date +%T)] phase1 done ($n 轮双杀)"
 
@@ -102,6 +126,10 @@ echo "[$(date +%T)] phase2 done ($m 轮兜底)"
 PID=$(rish -c 'pidof com.heytap.openid' 2>/dev/null)
 PROV=$(rish -c 'dumpsys activity providers | grep -c ids_provider' 2>/dev/null)
 echo "[$(date +%T)] final: openid_pid=[$PID] ids_provider=[$PROV]"
+
+# 自己解锁，别把通知留在通知栏上（锁没释放的话会一直挂着）
+termux-wake-unlock 2>/dev/null
+echo "[$(date +%T)] wakelock released"
 
 # 到此脚本结束 -> Termux:Boot 启动的 TermuxService 停止 -> com.termux 进程被系统回收。
 # 不需要手动 force-stop: 用 force-stop 会把 com.termux 置为 stopped 状态，
