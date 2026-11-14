@@ -75,7 +75,7 @@ OPPO 是 `com.oplus.statistics.rom` / `com.oplus.onetrack` / `com.oplus.deepthin
 | [小米平板 5 Pro](小米平板5Pro-M2105K81AC.md) | `PERSISTENT` 应用 `disable-user` 无效、`kill -9` 会 4 秒复活，必须 `uninstall --user 0` |
 | [荣耀 Magic Vs2](荣耀MagicVs2-VER-AN00.md) | `hiview` 是三层结构，禁用应用层只关掉三分之一，native 与 vendor 层无 root 就是无解 |
 | [Redmi K30 4G](RedmiK30-4G-phoenix.md) | 装了 PIF 的机器 `ro.boot.*` 全部不可信，判断 BL 状态只能 `fastboot getvar unlocked` |
-| [OPPO A7 Pro Max](OPPOA7ProMax-PYC110.md) | 「禁用包数」三个答案：`pm list -d`=21、加 `-u`=22、`dumpsys enabled=3`=21。两个 21 **集合完全不同**（各有 1 个漏报、2 个假阳性），只信 dumpsys |
+| [OPPO A7 Pro Max](OPPOA7ProMax-PYC110.md) | `suspend` 挡得住 Activity，挡不住 `ContentResolver.query`：负一屏查 `CardStatusProvider` → 快应用平台查 `OAIDStatusProvider`，两级转发就能把已挂起的 openid 拉活。**删干净不是终点，秒级压制才是** |
 
 ## 复现
 

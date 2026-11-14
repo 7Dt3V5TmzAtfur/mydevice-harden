@@ -1526,14 +1526,9 @@ pm disable-user --user 0 com.nearme.instant.platform       → new state: defaul
 
 最终落在：`installed=true suspended=true enabled=0` —— 挂起，和 `com.heytap.openid`、OTA 三包同一手法。
 
-**但这一轮不是白干。** 附五 §2 留了个尾巴：`com.heytap.openid` 每次开机都会被拉活一次，触发者正是快应用平台：
+**但这一轮不是白干吗？——先别急着下结论，下面有一次自我推翻。**
 
-```
-18:47:50 I ActivityManager: Start proc 10618:com.heytap.openid/u0a114
-          for content provider {com.heytap.openid/.oaidcontrolled.OAIDStatusProvider}
-```
-
-卸掉 `com.oppo.instant.local.service` + 平台挂起 + 「客户端 + 服务端」双杀之后，连续巡检：
+卸掉 `com.oppo.instant.local.service` + 平台挂起 + 「客户端 + 服务端」双杀之后，手动连续巡检：
 
 | 时刻 | `pidof com.heytap.openid` | `pidof com.nearme.instant.platform` | `dumpsys activity providers \| grep -c ids_provider` |
 |------|--------------------------|-------------------------------------|------|
@@ -1544,7 +1539,60 @@ pm disable-user --user 0 com.nearme.instant.platform       → new state: defaul
 
 对照：同样的双杀命令，在没卸本地服务之前，**两分钟内必定复活**（附五 §2 的 T+120s 记录）。
 
-**结论**：快应用平台本体在 ColorOS 保护名单里，无 root 不可移除，这条路到此为止；但「卸掉本地服务 + 平台挂起 + 与 openid 同杀」三步做完，实际效果是 OAID 提供方开机后不再被唤醒——这比单纯删掉一个入口更接近真正目的。开机后的持续压制交给 Termux:Boot 脚本（见附六）。
+看到这张表很容易得出「openid 不再被拉活」的结论。**我当场就是这么写的，然后在 10 分钟后的下一次重启里被推翻。**
+
+#### 8.1 推翻：T+4min 还是复活了，触发器不是快应用平台自己
+
+第四次重启（18:52:38）后的 logcat 里，仍有一条 `Start proc`：
+
+```
+18:56:33.101 I am_proc_start: [0,12473,10211,com.nearme.instant.platform:provider,content provider,
+              {com.nearme.instant.platform/com.nearme.instant.card.CardStatusProvider},
+              { callingPackage = com.coloros.assistantscreen }]
+18:56:33.369 I am_proc_start: [0,12555,10114,com.heytap.openid,content provider,
+              {com.heytap.openid/com.heytap.openid.oaidcontrolled.OAIDStatusProvider},
+              { callingPackage = com.nearme.instant.platform }]
+18:56:37.275 I ActivityManager: Force stopping com.heytap.openid appid=10114 user=0: from pid 12836
+18:56:36.602 I auditd: avc: granted { execute } for comm="00-oaid-kill.sh" name="rish" ...
+              app=com.termux.boot
+```
+
+完整链路是**两级转发**，起点根本不在快应用平台：
+
+```
+com.coloros.assistantscreen（负一屏 /product/app/AssistantScreen v16.5.129）
+  └─ 查询 CardStatusProvider
+       └─ 拉活 com.nearme.instant.platform:provider（已挂起，但 provider 查询不受挂起拦截）
+            └─ 它再去查 OAIDStatusProvider
+                 └─ 拉活 com.heytap.openid  → OAID 出口上线
+```
+
+三件事因此被说清楚：
+
+1. **卸本地服务、挂起平台，都消不掉触发器**。触发器是负一屏，快应用平台只是中间人——而且它对 `ContentResolver.query` 完全不设防，`suspended=true` 也照查不误（又一次印证「挂起只挡 UI 不挡 binder」）。
+2. **为什么 T+180s 是空的**：负一屏要开完机 4 分钟才起来查卡片。我的巡检窗口太短，正好把复活时刻漏在窗外。
+3. **为什么现在仍是 0**：不是没复活，是开机脚本在复活后 **3.4 秒内**就把它摁回去了（18:56:33.369 起 → 18:56:37.279 杀，`from pid 12836` 即 rish 拉起的 force-stop）。此后到 19:02（重启后 10 分钟）logcat 里 `Start proc ... heytap.openid` 计数仍为 1，没有第二次。
+
+**顺带发现的同构案例**：同一分钟内 `com.oplus.romupdate` 也被别人拉活了——
+
+```
+18:56:34.277 I am_proc_start: [0,12769,10230,com.oplus.romupdate,content provider,
+              {com.oplus.romupdate/com.oplusos.romupdate.provider.RomUpdateProvider},
+              { callingPackage = com.oplus.athena }
+```
+
+OTA 那三个包挂起后仍能被 `com.oplus.athena` 通过 provider 查询拉起来。**只要系统里还有一个愿意查它的客户端，挂起就只是「Activity 起不来」而已。**
+
+#### 8.2 修正后的结论
+
+| 说法 | 是否成立 |
+|------|---------|
+| 快应用平台本体可卸载 | ❌ 保护名单，三种删法全 `DELETE_FAILED_INTERNAL_ERROR`，只能挂起 |
+| 本地服务 `com.oppo.instant.local.service` 可卸载 | ✅ 且卸掉后 `enabled` 归 0，确实少一个进程 |
+| 清掉这些之后 openid 不再被拉活 | ❌ **不成立**。负一屏每开机约 4 分钟拉活一次 |
+| 开机脚本能把它压住 | ✅ 实测复活后 3.4 秒内杀掉，且此后 10 分钟无二次复活 |
+
+所以真正的防线不是「删干净」，而是**删到只剩一个能被反复拉活的出口 + 每次拉活都在几秒内被摁掉**。想彻底断掉这条链，得动负一屏 `com.coloros.assistantscreen`——那是 `/product/app/AssistantScreen` 的系统应用，属于功能取舍（负一屏卡片会一起消失），没有替用户做这个决定。
 
 ### 9. 本轮回滚
 
@@ -1662,11 +1710,13 @@ adb shell dumpsys deviceidle whitelist +moe.shizuku.privileged.api
 | 阶段 | 做什么 | 为什么 |
 |------|--------|--------|
 | 等待 | 每 15 秒 `rish -c id`，最多 40 次（10 分钟） | Shizuku server 起来有时间差，实测 attempt 0~1 就绪 |
-| 阶段 1 | **每 15 秒双杀 20 轮**（前 5 分钟） | 开机是竞态高发期：快应用平台先起，然后查 `OAIDStatusProvider` 把 openid 拉活，砍早了没用 |
+| 阶段 1 | **每 15 秒双杀 20 轮**（前 5 分钟） | 复活不是开机瞬间发生的：实测负一屏 4 分钟后才查卡片（见附五 §8.1），砍早了没用，得铺满窗口 |
 | 阶段 2 | 每 2 分钟巡检 15 次（30 分钟），发现复活再双杀 | 兜住延迟唤醒 |
 | 收尾 | 记录 `openid_pid` / `ids_provider` 计数 | 留证据，不必开电脑看 |
 
 双杀的对象固定两个：`com.heytap.openid` + `com.nearme.instant.platform`。只杀前者会被后者的 binder 连接吊回来。
+
+**这条脚本不是保险，是唯一防线。** 附五 §8.1 已证明：把快应用本地服务卸掉、平台挂起之后，负一屏仍会在开机约 4 分钟时通过 `CardStatusProvider → OAIDStatusProvider` 两级转发把 openid 拉活。脚本实测在拉活后 **3.4 秒**把它摁回去，此后 10 分钟 logcat 无二次复活记录。
 
 推送方式（`run-as` 避免 `/sdcard` 中转的权限问题）：
 
@@ -1684,6 +1734,18 @@ adb shell "run-as com.termux md5sum files/home/.termux/boot/00-oaid-kill.sh"   #
 [18:58:11] phase1 done (20 轮双杀)
 （阶段 2 巡检中，至 19:28 结束）
 ```
+
+日志里看不到「复活」，因为复活被压在系统日志侧，要到 logcat 里找：
+
+| 时刻 | 事件 | 证据 |
+|------|------|------|
+| 18:56:33.101 | 负一屏查 `CardStatusProvider`，拉起快应用平台 provider 进程 | `am_proc_start ... callingPackage = com.coloros.assistantscreen` |
+| 18:56:33.369 | 平台进程转查 `OAIDStatusProvider`，**openid 被拉活** | `am_proc_start ... callingPackage = com.nearme.instant.platform` |
+| 18:56:36.602 | rish 被 boot 脚本调起 | `auditd: comm="00-oaid-kill.sh" ... app=com.termux.boot` |
+| 18:56:37.279 | openid 被杀 | `Killing 12555:com.heytap.openid ... from pid 12836` |
+| 19:02（重启后 10 分钟） | 无二次复活 | `grep -c 'Start proc.*heytap.openid'` = 1（仅上述那一次） |
+
+**从被拉活到被杀掉，3.4 秒。** 这就是「零手动」实际买到的东西：不是让它不复活，而是让每次复活只有几秒钟寿命。
 
 | 检查 | 结果 |
 |------|------|
