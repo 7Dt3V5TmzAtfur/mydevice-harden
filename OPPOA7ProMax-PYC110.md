@@ -1594,6 +1594,41 @@ OTA 那三个包挂起后仍能被 `com.oplus.athena` 通过 provider 查询拉�
 
 所以真正的防线不是「删干净」，而是**删到只剩一个能被反复拉活的出口 + 每次拉活都在几秒内被摁掉**。想彻底断掉这条链，得动负一屏 `com.coloros.assistantscreen`——那是 `/product/app/AssistantScreen` 的系统应用，属于功能取舍（负一屏卡片会一起消失），没有替用户做这个决定。
 
+#### 8.3 反例：把负一屏也加进击杀名单，结果反而更糟（第六次重启）
+
+第五次重启（19:05）证明挂起挡不住查询之后，我的判断是「那就把发起查询的进程杀掉」。于是把 `com.coloros.assistantscreen` 加进开机脚本的击杀名单，变成「三杀」。
+
+19:13:47 重启，结果适得其反：
+
+```
+19:13:50.631 am_proc_start assistantscreen {AssistantKeepAliveService}
+             { callingPackage = com.android.launcher, serviceType = bindService }
+19:13:51.265 am_proc_start com.heytap.openid {OAIDStatusProvider}      ← 起来第一件事
+19:13:52.551 am_proc_start instant.platform:provider {AppInfoProvider}
+19:14:06.562 am_proc_start assistantscreen {AssistantKeepAliveService}  ← 16 秒后重来一遍
+19:14:07.015 am_proc_start com.heytap.openid ...
+19:14:22.463 am_proc_start assistantscreen ...
+19:14:38.355 am_proc_start assistantscreen ...
+```
+
+根因：**桌面 `com.android.launcher` 对负一屏持有一个 `bindService(AssistantKeepAliveService)` 的保活绑定。**
+杀一次 → 桌面立刻重新绑定 → 进程秒起 → 它起来第一件事就是查 `OAIDStatusProvider`。
+原本每轮开机只唤醒 1 次，被我改成了**每 15~16 秒唤醒 1 次**——这是反向加压，不是加固。
+
+已立即回退：击杀名单固定为 `openid` + `instant.platform` 两个，负一屏保持「只挂起、不反复杀」。脚本里写下了这条反例注释，防止以后（包括我自己）再犯。
+
+#### 8.4 四次重启对照与最终参数
+
+| 重启 | 时刻 | 击杀名单 | openid 被拉起 | 存活时长 | 备注 |
+|------|------|---------|--------------|---------|------|
+| 第 4 次 | 18:52:38 | openid + instant | 1 次（T+3.9min） | 3.4s | 负一屏当时未挂起 |
+| 第 5 次 | 19:05:14 | openid + instant（负一屏已挂起） | 1 次（T+3.9min） | 6.8s | 证明挂起不挡 provider 查询 |
+| 第 6 次 | 19:13:47 | **+ assistantscreen** | **每 15~16s 一轮** | — | ❌ 反例，已回退 |
+| 第 7 次 | 19:22:11 | openid + instant（最终参数） | 1 次（T+3.95min） | **3.7s** | ✅ 采用 |
+
+最终形态：**每次开机 openid 只有一次约 4 秒的活口，其余时间进程与 provider 全部为 0。**
+这就是无 root 条件下这条链的天花板——不是「不复活」，而是「复活了也活不过几秒」。
+
 ### 9. 本轮回滚
 
 ```bash
@@ -1705,7 +1740,7 @@ adb shell dumpsys deviceidle whitelist +moe.shizuku.privileged.api
 
 ### 5. 开机脚本干的事
 
-脚本随仓库一起放在 [`scripts/termux-boot-00-oaid-kill.sh`](scripts/termux-boot-00-oaid-kill.sh)（1785 B，与机内文件 md5 一致 `fe5ffdb294e3701fbd7e3bbc2bdf74f6`），部署到 `~/.termux/boot/00-oaid-kill.sh`，chmod 700。逻辑三段：
+脚本随仓库一起放在 [`scripts/termux-boot-00-oaid-kill.sh`](scripts/termux-boot-00-oaid-kill.sh)（3164 B，与机内文件 md5 一致 `4a7aaf44620ae157dcf255a3f49c3867`），部署到 `~/.termux/boot/00-oaid-kill.sh`，chmod 700。逻辑三段：
 
 | 阶段 | 做什么 | 为什么 |
 |------|--------|--------|
@@ -1716,7 +1751,9 @@ adb shell dumpsys deviceidle whitelist +moe.shizuku.privileged.api
 
 双杀的对象固定两个：`com.heytap.openid` + `com.nearme.instant.platform`。只杀前者会被后者的 binder 连接吊回来。
 
-**这条脚本不是保险，是唯一防线。** 附五 §8.1 已证明：把快应用本地服务卸掉、平台挂起之后，负一屏仍会在开机约 4 分钟时通过 `CardStatusProvider → OAIDStatusProvider` 两级转发把 openid 拉活。脚本实测在拉活后 **3.4 秒**把它摁回去，此后 10 分钟 logcat 无二次复活记录。
+**不要把负一屏加进来。** 试过，结果从「每轮开机唤醒 1 次」恶化成「每 15~16 秒唤醒 1 次」——桌面持有它的 `AssistantKeepAliveService` 保活绑定，杀一次就重绑一次。详见附五 §8.3。
+
+**这条脚本不是保险，是唯一防线。** 附五 §8.1 已证明：把快应用本地服务卸掉、平台挂起、连负一屏都挂起之后，负一屏仍会在开机约 4 分钟时通过 `CardStatusProvider → OAIDStatusProvider` 两级转发把 openid 拉活。脚本实测在拉活后 **3.7 秒**把它摁回去，此后直到窗口结束无二次复活。
 
 推送方式（`run-as` 避免 `/sdcard` 中转的权限问题）：
 
@@ -1726,35 +1763,35 @@ adb shell "cat /sdcard/00.sh | run-as com.termux sh -c 'mkdir -p files/home/.ter
 adb shell "run-as com.termux md5sum files/home/.termux/boot/00-oaid-kill.sh"   # 核对 md5
 ```
 
-### 6. 实测时间线（第四次重启，18:52:38）
+### 6. 实测时间线（第七次重启，19:22:11，最终参数）
 
 ```
-===== 2026-11-14 18:52:38 boot =====
-[18:52:54] rish ready (attempt 1)          ← 开机后 16 秒拿到 shell 身份
-[18:58:11] phase1 done (20 轮双杀)
-（阶段 2 巡检中，至 19:28 结束）
+===== 2026-11-14 19:22:11 boot =====
+[19:22:13] rish ready (attempt 0)          ← 开机后 2 秒拿到 shell 身份
+[19:27:30] phase1 done (20 轮双杀)
+（阶段 2 巡检中）
 ```
 
 日志里看不到「复活」，因为复活被压在系统日志侧，要到 logcat 里找：
 
 | 时刻 | 事件 | 证据 |
 |------|------|------|
-| 18:56:33.101 | 负一屏查 `CardStatusProvider`，拉起快应用平台 provider 进程 | `am_proc_start ... callingPackage = com.coloros.assistantscreen` |
-| 18:56:33.369 | 平台进程转查 `OAIDStatusProvider`，**openid 被拉活** | `am_proc_start ... callingPackage = com.nearme.instant.platform` |
-| 18:56:36.602 | rish 被 boot 脚本调起 | `auditd: comm="00-oaid-kill.sh" ... app=com.termux.boot` |
-| 18:56:37.279 | openid 被杀 | `Killing 12555:com.heytap.openid ... from pid 12836` |
-| 19:02（重启后 10 分钟） | 无二次复活 | `grep -c 'Start proc.*heytap.openid'` = 1（仅上述那一次） |
+| 19:26:08.621 | 负一屏的延迟查询链路走通，**openid 被拉活** | `Start proc 12052:com.heytap.openid ... OAIDStatusProvider` |
+| 19:26:12.351 | openid 被杀 | `Killing 12052:com.heytap.openid ... from pid 12222`（即 rish） |
+| 19:29:55（uptime 464s） | 复查：openid 空、instant 空、`ids_provider` 计数 0 | 见下表 |
 
-**从被拉活到被杀掉，3.4 秒。** 这就是「零手动」实际买到的东西：不是让它不复活，而是让每次复活只有几秒钟寿命。
+**从被拉活到被杀掉，3.7 秒。** 这就是「零手动」实际买到的东西：不是让它不复活，而是让每次复活只有几秒钟寿命。
 
-| 检查 | 结果 |
+| 检查（uptime 464s 时） | 结果 |
 |------|------|
 | `pidof com.heytap.openid` | 空 |
 | `pidof com.nearme.instant.platform` | 空 |
 | `dumpsys activity providers \| grep -c ids_provider` | 0 |
+| 禁用 `enabled=3` 计数 | 21 |
+| 挂起 `suspended=true` 计数 | 13 |
 | Shizuku 界面 | 「Shizuku 正在运行 / 版本 13.5，adb / 已授权 1 个应用」 |
 
-全程**没有碰过手机**。
+全程**没有碰过手机**。第 5、6、7 次共三次重启都是同一个结论：`rish ready (attempt 0)`，即开机后 1~2 秒就拿到 shell 身份。
 
 ### 7. 三条硬前提（少一条就退化回手动）
 

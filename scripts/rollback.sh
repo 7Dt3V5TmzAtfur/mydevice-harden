@@ -63,6 +63,7 @@ SUSPEND=(
   com.nearme.instant.platform
   com.oplus.cota
   com.oplus.romupdate
+  com.coloros.assistantscreen
 )
 
 # -----------------------------------------------------------------------------

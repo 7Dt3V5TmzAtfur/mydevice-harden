@@ -15,7 +15,7 @@
 | 1 | 小米平板 5 Pro 11″<br>`M2105K81AC` / elish | Android 13<br>MIUI `V14.0.3.0.TKYCNXM` | ✅ Magisk 26.1<br>BL 已解锁 | hosts 24,936 行<br>+ iptables | disable 24<br>+ uninstall 1 | [小米平板5Pro-M2105K81AC.md](小米平板5Pro-M2105K81AC.md) |
 | 2 | 荣耀 Magic Vs2<br>`VER-AN00` | Android 13<br>MagicOS `7.2.0.125` | ❌ 无<br>BL 锁定 | ✗ 不可写 | disable 15<br>+ settings 1 | [荣耀MagicVs2-VER-AN00.md](荣耀MagicVs2-VER-AN00.md) |
 | 3 | Redmi K30 4G<br>`phoenix` | Android 12<br>MIUI `V13.0.6.0.SGHCNXM` | ✅ Magisk 31.1<br>BL 已解锁 | hosts 80 条<br>+ iptables | disable 8 + uninstall 2<br>+ 预装清退 15 | [RedmiK30-4G-phoenix.md](RedmiK30-4G-phoenix.md) |
-| 4 | OPPO A7 Pro Max<br>`PYC110` | Android 16<br>ColorOS `V16.1.0`<br>`PYC110_16.0.9.409(CN01)` | ❌ 无<br>**BL 不可解锁** | ✗ | disable 21 + uninstall 2<br>+ suspend 12<br>+ Shizuku 免电脑自启<br>+ Termux:Boot 开机脚本 | [OPPOA7ProMax-PYC110.md](OPPOA7ProMax-PYC110.md) |
+| 4 | OPPO A7 Pro Max<br>`PYC110` | Android 16<br>ColorOS `V16.1.0`<br>`PYC110_16.0.9.409(CN01)` | ❌ 无<br>**BL 不可解锁** | ✗ | disable 21 + uninstall 2<br>+ suspend 13<br>+ Shizuku 免电脑自启<br>+ Termux:Boot 开机脚本 | [OPPOA7ProMax-PYC110.md](OPPOA7ProMax-PYC110.md) |
 
 四台跨了小米 / 荣耀 / Redmi / OPPO 四个厂商，Android 12 / 13 / 16 三个大版本，
 有 root 与无 root 各两台——这个组合正好能把「哪些结论是通用的、哪些只是某台设备的特例」分开。
@@ -112,7 +112,7 @@ README.md                        本文件
 RedmiK30-4G-phoenix.md            #3 Redmi K30 / phoenix
 OPPOA7ProMax-PYC110.md            #4 OPPO PYC110
 .gitattributes                    强制 *.sh 用 LF（否则 Windows 检出后脚本跑不起来）
-scripts/apply-tier2.sh            #4 一键应用（21 禁用 + 2 卸载 + 12 挂起 + 权限/设置 + Shizuku）
+scripts/apply-tier2.sh            #4 一键应用（21 禁用 + 2 卸载 + 13 挂起 + 权限/设置 + Shizuku）
 scripts/rollback.sh               #4 一键全量复原（默认保留 Shizuku，--strict 连它一起撤）
 scripts/termux-boot-00-oaid-kill.sh  #4 开机脚本，推到 Termux:Boot 目录后开机自动跑（md5 与机内一致）
 ```

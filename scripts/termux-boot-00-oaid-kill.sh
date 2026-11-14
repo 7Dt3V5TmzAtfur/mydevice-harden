@@ -1,8 +1,25 @@
 #!/data/data/com.termux/files/usr/bin/sh
-# OPPO PYC110: 开机后自动让 OAID 归零（无 root，借 Shizuku 的 shell 权限）
+# OPPO PYC110: 开机后自动压制 OAID 出口（无 root，借 Shizuku 的 shell 权限）
 # 由 Termux:Boot 在 BOOT_COMPLETED 后自动执行，全程无需人工操作。
-# 原理: com.nearme.instant.platform(快应用平台) 开机会查 OAIDStatusProvider，
-#       把 com.heytap.openid 拉活；所以必须在开机后几分钟内反复「双杀」压掉竞态窗口。
+#
+# 实测链路（04 次重启与 05 次重启各抓到一次，日志见仓库 OPPOA7ProMax-PYC110.md 附五 §8）：
+#   com.android.launcher 查 AssistantConfigProvider
+#     -> 拉起 com.coloros.assistantscreen（负一屏）进程
+#          -> 约 4 分钟后查 com.nearme.instant.card.CardStatusProvider
+#               -> 拉起 com.nearme.instant.platform:provider（快应用平台，已挂起也照起）
+#                    -> 它再查 com.heytap.openid 的 OAIDStatusProvider
+#                         -> OAID 出口上线
+#
+# 关键结论:
+#   1) pm suspend 对 ContentResolver.query 完全不设防（宿主侧、调用方侧都是）。
+#   2) 组件级 pm disable 被保护名单拒绝: Shell cannot change component state ... to 2。
+#   3) 【反例，务必不要再犯】不要把 com.coloros.assistantscreen 加进击杀名单。
+#      桌面 com.android.launcher 对它持有 bindService(AssistantKeepAliveService)，
+#      杀掉后桌面立刻重新绑定、进程秒起，而它起来第一件事就是查 OAIDStatusProvider。
+#      实测: 只杀 openid+instant 时每轮开机唤醒 1 次（存活约 6.8 秒）；
+#            加上杀 assistantscreen 后变成每 15~16 秒唤醒 1 次（06 次重启实测）。
+#      所以负一屏只能「挂起」（挡 UI），不能「反复杀」（会变成反向加压）。
+# 因此击杀名单固定为两个: openid + instant.platform。
 # 2026-11-14
 H=/data/data/com.termux/files/home
 LOG=$H/boot-oaid.log
@@ -24,7 +41,9 @@ while [ $i -lt 40 ]; do
 done
 if [ $i -ge 40 ]; then echo "[$(date +%T)] FATAL: rish 不可用"; exit 1; fi
 
-# 阶段1: 前 5 分钟每 15 秒双杀一次（压掉开机竞态；instant.platform 会在开机后几十秒才起来）
+# 阶段1: 前 5 分钟每 15 秒双杀一次
+#   为什么不是只在开机瞬间杀一刀: 复活发生在开机后约 4 分钟（负一屏延迟查询），
+#   砍早了没用；15 秒一轮能把「被拉活到被杀」的窗口压到 15 秒以内（实测 6.8 秒）。
 n=0
 while [ $n -lt 20 ]; do
   rish -c "$KILL" >/dev/null 2>&1

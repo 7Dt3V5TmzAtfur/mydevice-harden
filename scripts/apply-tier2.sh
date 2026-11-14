@@ -117,6 +117,9 @@ SUSPEND=(
                                         # 卸掉本地服务 + 本包挂起后，openid 不再被拉活
   com.oplus.cota                        # OTA（挂起失败属正常，见文档「OTA 硬墙」）
   com.oplus.romupdate                   # OTA（同上）
+  com.coloros.assistantscreen           # 负一屏 /product/app/AssistantScreen 16.5.129
+                                        # 它是 openid 被拉活的链条起点（查 CardStatusProvider）
+                                        # 但 suspend 对 provider 查询无效，真正压它靠开机脚本
 )
 
 say "2. 挂起 ${#SUSPEND[@]} 个包"
@@ -238,7 +241,7 @@ say "7. 验证"
 DIS_CNT=$(adb shell dumpsys package | grep 'User 0: ceDataInode' | grep -c 'enabled=3')
 SUS_CNT=$(adb shell dumpsys package | awk '/^  Package \[/{p=$2} /suspended=true/{print p}' | sort -u | wc -l)
 echo "禁用/卸载标记数: $DIS_CNT  (预期 21 = 20 真禁用 + 1 卸载壳 onetrace)"
-echo "挂起包数:        $SUS_CNT  (预期 12)"
+echo "挂起包数:        $SUS_CNT  (预期 13)"
 echo
 echo "关键状态:"
 for p in com.heytap.openid com.opos.ads com.heytap.browser com.mobiletools.systemhelper; do
