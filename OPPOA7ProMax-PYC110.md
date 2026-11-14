@@ -1211,6 +1211,7 @@ pm revoke com.coloros.weather.service android.permission.ACCESS_FINE_LOCATION
 | `com.heytap.pictorial` | 锁屏杂志（广告位），`READ_PRIVILEGED_PHONE_STATE` | 停用 | `suspended=true` |
 | `com.heytap.tas`（TasWallet） | 钱包/交通卡框架，带**后台定位** + `READ_PRIVILEGED_PHONE_STATE` | **没禁**（本机有 NFC，可能管交通卡），只撤定位 | 两项 `granted=false` |
 | `com.heytap.openid` | OAID / 设备标识下发 | 只 force-stop，未禁用 | 禁用会让部分三方 SDK 拿不到 OAID，风险自定 |
+| `com.oplus.apprecover` | `/product/priv-app/MDSService`，"应用恢复"——`AppRecoverActivity`（**把卸掉的预装应用再装回来**）+ `CalendarMissActivity` | `pm disable-user` | `enabled=3`，本就没在跑 |
 
 注意 `pm disable-user` 在 ColorOS 上并不总是真禁用：对 `pantanal.ums` / `pictorial` / `nearme.instant.platform`
 它回的是 `new state: default`，但包状态变成 **`suspended=true`**——系统把「禁用」改成了「挂起」。
@@ -1245,6 +1246,10 @@ regservice / pantanal / instant / pictorial 进程 → 全部为 0
 
 所以「系统文件更新」和「检查更新」这两件事，**免 root 下切不断**，原因不是没找到开关，而是：
 
+0. **「系统文件更新」这个页面本身就住在 `com.oplus.ota` 里**——`oplus.intent.action.opex_update` 指向
+   `com.oplus.ota/com.oplus.otaui.activity.OpexUpdateActivity`，跟 OTA 同一个包，同一个保护名单。
+   之前以为它在 `com.oplus.apprecover`（MDSService）是记错了：那个是"应用恢复"（`AppRecoverActivity`），
+   和系统文件更新无关，本轮已单独停用（见 5.4）。
 1. 包在 system_server 的硬保护名单里（连组件级 `pm disable` 都抛异常）；
 2. 通知开关被 UI 灰化 + AppOps 写入无效；
 3. 联网管理对系统 App 不给「禁用网络」这一项。
