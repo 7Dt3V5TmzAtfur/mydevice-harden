@@ -1,0 +1,6 @@
+# Shell 脚本必须保持 LF，否则 Linux/macOS 上执行报
+# "/usr/bin/env: 'bash\r': No such file or directory"
+*.sh text eol=lf
+
+# 文档用 UTF-8，不做行尾强制转换
+*.md text
