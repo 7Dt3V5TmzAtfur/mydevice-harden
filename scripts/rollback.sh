@@ -29,7 +29,6 @@ hr()  { printf '%s\n' "---------------------------------------------------------
 DISABLE=(
   com.mobiletools.systemhelper
   com.coloros.regservice
-  com.oppo.instant.local.service
   com.qualcomm.qti.devicestatisticsservice
   com.oplus.apprecover
   com.oplus.logtrial
@@ -96,7 +95,10 @@ done
 
 # -----------------------------------------------------------------------------
 say "2b. 恢复被用户级卸载的包"
-for p in com.oplus.onetrace; do
+# 顺序有讲究: 先恢复快应用本地服务，再恢复 onetrace。两者互不依赖，但都必须在
+# 「解除挂起」之后——平台本体 com.nearme.instant.platform 若仍挂着，本地服务
+# 起来也会被绑回挂起态。
+for p in com.oppo.instant.local.service com.oplus.onetrace; do
   printf '  install-existing %-38s' "$p"
   if [ "$DRY" = "1" ]; then echo "[dry]"; else
     r=$(adb shell pm install-existing --user 0 "$p" 2>&1 | tr -d '\r')

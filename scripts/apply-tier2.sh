@@ -46,7 +46,7 @@ fi
 DISABLE=(
   com.mobiletools.systemhelper          # 联通 OMA-DM 终端管理, 上报 dm.wo.com.cn
   com.coloros.regservice                # 移动 DM 注册, 上报 a.fxltsl.com
-  com.oppo.instant.local.service        # 快应用本地服务
+                                        # 注意: pm list packages -d 漏报这个包，只有 dumpsys 看得到
   com.qualcomm.qti.devicestatisticsservice
   com.oplus.apprecover                  # 应用恢复 MDSService（非 OTA）
   com.oplus.logtrial                    # 日志回传
@@ -84,6 +84,9 @@ done
 # -----------------------------------------------------------------------------
 REMOVE=(
   com.oplus.onetrace                    # 全链路埋点/追踪上报
+  com.oppo.instant.local.service        # 快应用本地服务（实测可卸，卸完 enabled 归 0）
+                                        # 平台本体 com.nearme.instant.platform 在保护名单里，
+                                        # 三种删法全失败，只能挂在 SUSPEND 里
 )
 
 say "1b. 卸载 ${#REMOVE[@]} 个包（用户级）"
@@ -110,7 +113,8 @@ SUSPEND=(
   com.heytap.openid                     # OAID 提供方 → 归零 OAID
   com.oplus.pantanal.ums                # 用户画像/画像标签
   com.oplus.themestore                  # 主题商店
-  com.nearme.instant.platform           # 快应用平台
+  com.nearme.instant.platform           # 快应用平台（保护名单，卸不掉，只能挂）
+                                        # 卸掉本地服务 + 本包挂起后，openid 不再被拉活
   com.oplus.cota                        # OTA（挂起失败属正常，见文档「OTA 硬墙」）
   com.oplus.romupdate                   # OTA（同上）
 )
@@ -220,13 +224,20 @@ if [ "$DRY" = "1" ]; then
 fi
 
 say "7. 验证"
-# 口径说明（三个命令结果不一致，以 dumpsys 为准）:
-#   pm list packages -d      → 21（漏报 com.coloros.regservice）
-#   pm list packages -d -u   → 22
-#   dumpsys enabled=3        → 22（含 1 个已卸载残留壳 com.oplus.onetrace）
+# 口径说明（三个命令结果互不相等，只信 dumpsys）:
+#   dumpsys  enabled=3     → 21  = 20 真禁用 + 1 卸载残留壳(com.oplus.onetrace)
+#   pm list packages -d    → 21  = 19 真禁用 + 2 假阳性 - 漏报 1 个(见下)
+#   pm list packages -d -u → 22  = 上面 21 + onetrace
+#
+#   两处必须知道的偏差:
+#     (a) 漏报: com.coloros.regservice 是真的 enabled=3，但 pm -d 不列它。
+#     (b) 假阳性: com.android.virtualization.terminal(manifest 自带 enabled=false)
+#         和 com.oplus.customize.coreapp(实际 enabled=2，只是有子组件被禁)
+#         都会被 pm -d 列进来，但 dumpsys 里根本不算禁用。
+#   结论: 只有 `dumpsys package | grep 'User 0:' | grep -c enabled=3` 可信。
 DIS_CNT=$(adb shell dumpsys package | grep 'User 0: ceDataInode' | grep -c 'enabled=3')
 SUS_CNT=$(adb shell dumpsys package | awk '/^  Package \[/{p=$2} /suspended=true/{print p}' | sort -u | wc -l)
-echo "禁用/卸载标记数: $DIS_CNT  (预期 22 = 21 真禁用 + 1 卸载壳 onetrace)"
+echo "禁用/卸载标记数: $DIS_CNT  (预期 21 = 20 真禁用 + 1 卸载壳 onetrace)"
 echo "挂起包数:        $SUS_CNT  (预期 12)"
 echo
 echo "关键状态:"

@@ -1436,37 +1436,43 @@ ACCESS_BACKGROUND_LOCATION: granted=false（本来就 false）
 
 | 文件 | 作用 | 关键设计 |
 |------|------|---------|
-| `scripts/apply-tier2.sh` | 在一台干净同型号机上复现整套加固 | 22 禁用 + 1 卸载 + 12 挂起 + force-stop + 定位/通知撤销 + 广告开关 + Opex 清零 + Shizuku 通知授权与 doze 白名单；每步回读校验，键写不进去会打 `!! 回读=x` |
+| `scripts/apply-tier2.sh` | 在一台干净同型号机上复现整套加固 | 21 禁用 + 2 卸载 + 12 挂起 + force-stop + 定位/通知撤销 + 广告开关 + Opex 清零 + Shizuku 通知授权与 doze 白名单；每步回读校验，键写不进去会打 `!! 回读=x` |
 | `scripts/rollback.sh` | 全量复原 | `unsuspend` + `default-state` + `enable` + `install-existing`；设置项用 `settings delete` 回落系统默认（不猜默认值）；权限 grant 回去；`--strict` 连 Shizuku 授权一起撤 |
+| `scripts/termux-boot-00-oaid-kill.sh` | 开机自动压制 openid | 见附六。推到 Termux:Boot 目录后随开机执行，无需 root，md5 与机内文件一致 |
 | `.gitattributes` | 强制 `*.sh` 用 LF | 否则 Windows 检出后 CRLF，Linux 上跑会 `bad interpreter` |
 
 两个脚本都支持 `--dry-run`（只打印不执行），已实测 dry-run 输出正常。
 
 ### 5. 本轮最值得记的坑：「禁用包数」三个命令给出三个不同答案
 
-同一个时刻，三种统计方式：
+同一时刻，三种统计方式（数字为卸掉 `com.oppo.instant.local.service` 之后的复测值）：
 
 ```
 adb shell pm list packages -d --user 0        → 21
 adb shell pm list packages -d -u --user 0     → 22
-adb shell dumpsys package | grep 'User 0: ceDataInode' | grep -c 'enabled=3'  → 22
+adb shell dumpsys package | grep 'User 0: ceDataInode' | grep -c 'enabled=3'  → 21
 ```
 
-差异来源，三类各一例：
+三个数字没有一个能直接当答案：`21 / 22 / 21` 看起来像「前两个差 1」，实际上是**四个包在互相抵消**。差异来源逐包列清：
 
 | 包 | 真实状态 | 为什么口径不一致 |
 |----|---------|-----------------|
-| `com.coloros.regservice` | `enabled=3` 真禁用 | `pm list -d` **漏报**它（不带 `-u` 时不出现在列表里） |
-| `com.oplus.onetrace` | `installed=false enabled=3` | 早期是**卸载**（用户级），只剩一个空壳，`enabled=3` 会被误算作「禁用」 |
+| `com.coloros.regservice` | `enabled=3` 真禁用 | `pm list packages -d` **漏报**它（不带 `-u` 时不出现在列表里） |
+| `com.oplus.onetrace` | `installed=false enabled=3` | 早期是**卸载**（用户级），只剩一个空壳，`enabled=3` 会被误算作「禁用」；只有加 `-u` 才列 |
 | `com.android.virtualization.terminal` | `enabled=0` | manifest 内自带 `android:enabled="false"`，`pm list -d` 算它「禁用」，但 dumpsys 里 `enabled` 恒为 0，`pm disable` 只会回 `new state: default` |
+| `com.oplus.customize.coreapp` | `enabled=2`（**正常启用**） | 本轮新发现的第二个假阳性：只要包内有**任一子组件**被禁，整个包就会进 `pm list -d`，本体 `enabled` 却是 2 |
 
-**结论**：以后一律以 `dumpsys` 的 `enabled=` 字段为唯一判据，别信 `pm list packages -d` 的行数。
+算一下账就明白了：
+`dumpsys 21` 减去漏报的 `regservice`、减去壳 `onetrace`，等于 19；`pm -d 21` 是 19 + 两个假阳性（`virtualization.terminal`、`customize.coreapp`）= 21。**数字碰巧相等，集合完全不同。**
+
+**结论**：以后一律以 `dumpsys` 的 `enabled=` 字段为唯一判据，别信 `pm list packages -d` 的行数，也别拿三个数字互相校验。
+`scripts/apply-tier2.sh` 的 §7 已按这个结论改写，只打 dumpsys 口径。
 
 ### 6. 重启回归验证（18:03:40 重启 → boot_completed 约 24 秒）
 
 | 项 | 重启前 | 重启后 | 结论 |
 |----|--------|--------|------|
-| 禁用标记 `enabled=3` | 22 | 22 | ✅ 持久 |
+| 禁用标记 `enabled=3` | 22 | 22 | ✅ 持久（后续卸掉快应用本地服务后变为 21，见 §8） |
 | 挂起 `suspended=true` | 12 | 12 | ✅ 持久 |
 | `ota_disable_automatic_update` | 1 | 1 | ✅ |
 | `wifi_scan_always_enabled` | 0 | 0 | ✅ |
@@ -1499,7 +1505,48 @@ adb shell dumpsys package | grep 'User 0: ceDataInode' | grep -c 'enabled=3'  �
 **结论**：`PERSISTENT` + uid 1000 的系统组件，shell 权限下完全不可动，只能记录在案。
 它的功能是日志采集上报（崩溃/反馈日志），属隐私相关但**不影响去广告与云控主线**。
 
-### 8. 本轮回滚
+### 8. 快应用平台 `com.nearme.instant.platform`：本体卸不掉，但周边能清，而且清完 openid 不再复活
+
+需求很直接：「卸载快应用平台，我不需要。」实测分成两半——能卸的一刀下去就没了，卸不掉的那个撞的是和 OTA 同一堵墙。
+
+| 包 | 位置 / 版本 | `pm uninstall --user 0` | 结论 |
+|----|------------|------------------------|------|
+| `com.oppo.instant.local.service` | 快应用本地服务 | `Success` | ✅ 卸掉，`installed=false enabled=0` |
+| `com.nearme.instant.local.service` | — | `Unknown target package` | 本来就没装 |
+| `com.nearme.instant.platform`（平台本体） | `/product/app/Instant` v10.8.4，`pkgFlags=[SYSTEM HAS CODE ALLOW_CLEAR_USER_DATA]` | `Failure [DELETE_FAILED_INTERNAL_ERROR]` | ❌ 与 OTA / openid 同一待遇 |
+
+本体三种删法、一种禁法，全部失败：
+
+```
+pm uninstall --user 0 com.nearme.instant.platform          → Failure [DELETE_FAILED_INTERNAL_ERROR]
+cmd package uninstall --user 0 com.nearme.instant.platform → Failure [DELETE_FAILED_INTERNAL_ERROR]
+pm uninstall -k --user 0 com.nearme.instant.platform       → Failure [DELETE_FAILED_INTERNAL_ERROR]
+pm disable-user --user 0 com.nearme.instant.platform       → new state: default（回读 enabled 仍 0）
+```
+
+最终落在：`installed=true suspended=true enabled=0` —— 挂起，和 `com.heytap.openid`、OTA 三包同一手法。
+
+**但这一轮不是白干。** 附五 §2 留了个尾巴：`com.heytap.openid` 每次开机都会被拉活一次，触发者正是快应用平台：
+
+```
+18:47:50 I ActivityManager: Start proc 10618:com.heytap.openid/u0a114
+          for content provider {com.heytap.openid/.oaidcontrolled.OAIDStatusProvider}
+```
+
+卸掉 `com.oppo.instant.local.service` + 平台挂起 + 「客户端 + 服务端」双杀之后，连续巡检：
+
+| 时刻 | `pidof com.heytap.openid` | `pidof com.nearme.instant.platform` | `dumpsys activity providers \| grep -c ids_provider` |
+|------|--------------------------|-------------------------------------|------|
+| T+30s | 空 | 空 | 0 |
+| T+60s | 空 | 空 | 0 |
+| T+120s | 空 | 空 | 0 |
+| T+180s | 空 | 空 | 0 |
+
+对照：同样的双杀命令，在没卸本地服务之前，**两分钟内必定复活**（附五 §2 的 T+120s 记录）。
+
+**结论**：快应用平台本体在 ColorOS 保护名单里，无 root 不可移除，这条路到此为止；但「卸掉本地服务 + 平台挂起 + 与 openid 同杀」三步做完，实际效果是 OAID 提供方开机后不再被唤醒——这比单纯删掉一个入口更接近真正目的。开机后的持续压制交给 Termux:Boot 脚本（见附六）。
+
+### 9. 本轮回滚
 
 ```bash
 # 一键全量复原（含设置项回落默认、权限恢复、被卸载包 install-existing）
@@ -1511,12 +1558,165 @@ bash scripts/rollback.sh --dry-run
 # 连 Shizuku 的通知授权与 doze 白名单也撤（默认保留）
 bash scripts/rollback.sh --strict
 
-# 只回滚本轮新增的两项
+# 只回滚本轮新增的项
 adb shell pm unsuspend --user 0 com.heytap.openid
+adb shell pm install-existing --user 0 com.oppo.instant.local.service   # 快应用本地服务
+adb shell pm unsuspend --user 0 com.nearme.instant.platform            # 快应用平台（解除挂起）
 adb shell settings put secure key_enhance_service_browser 1
 adb shell settings put global recommend_notify_interval 3
 adb shell settings put global wifi_scan_always_enabled 1
 adb shell settings put secure com.heytap.market.settings.pref.show.new.user.notification true
 adb shell pm grant com.coloros.weather2 android.permission.ACCESS_FINE_LOCATION
 adb shell pm grant com.coloros.weather2 android.permission.ACCESS_COARSE_LOCATION
+```
+
+---
+
+## 附六：开机零手动（Shizuku 自启 + Termux:Boot 自动压制，2026-11-14 收官续）
+
+### 1. 需求与达成情况
+
+原话：「开机后，尽量不要让我手动做任何多余的动作。时间长了我会忘记，最好连 Shizuku 的操作也不用我手动做。」
+
+| 项 | 之前 | 现在 |
+|----|------|------|
+| 启动 Shizuku server | 进 App 点「启动」（附四已做到不用配对） | **完全不用碰**，开机自起 |
+| Shizuku 授权 | 首次弹「要允许 Termux 使用 Shizuku 吗」需点「始终允许」 | 已记住，不再弹 |
+| 压制 `com.heytap.openid` | 开机后手动 `am force-stop` | **Termux:Boot 脚本自动双杀 + 30 分钟巡检** |
+| 用户开机后要做的动作 | 2~3 步 | **0 步**（前提：连着 WiFi） |
+
+### 2. 选型：为什么是 Termux + Termux:Boot + rish
+
+三条路都试过或评估过，只有第三条通：
+
+| 方案 | 结论 |
+|------|------|
+| Tasker / MacroDroid 类自动化 | 开机事件在 ColorOS 上要后台常驻 + 自启白名单，且执行 `am`/`pm` 仍需 root 或 Shizuku，等于多绕一层 |
+| 直接 `adb shell` 常驻一个 loop | 必须电脑一直连着，重启即断，不符合「以后我会忘记」 |
+| **Termux + Termux:Boot + rish** | ✅ 手机上跑，借用 Shizuku 的 shell 身份（`uid=2000(shell)`），无需 root，重启自动执行 |
+
+`rish` 是 Shizuku 自带的「免 adb 的 shell」：从 Shizuku APK 里取出 `assets/rish`（882 B）+ `assets/rish_shizuku.dex`（59 KB），设 `RISH_APPLICATION_ID` 指向调用方包名，就能以 shell 身份执行命令。
+
+### 3. 落地步骤（可复现）
+
+```bash
+# ① 装 Termux 0.118.3(arm64) 与 Termux:Boot 0.8.1
+#    官方 GitHub 直连慢，走 ghproxy 镜像
+#    https://ghproxy.net/https://github.com/termux/termux-app/releases/download/v0.118.3/...
+#    https://ghproxy.net/https://github.com/termux/termux-boot/releases/download/v0.8.1/...
+adb install -r termux-app_v0.118.3+github-debug_arm64-v8a.apk
+adb install -r termux-boot_v0.8.1+github-debug.apk
+
+# ② 让 Termux 解包 bootstrap（首次启动会自己解，约 9 秒）
+adb shell monkey -p com.termux 1
+# 轮询直到 files/usr/bin 出现
+
+# ③ 取 rish
+adb shell "run-as com.termux sh -c 'cd files/home && unzip -o /data/app/*/moe.shizuku.privileged.api*/base.apk assets/rish assets/rish_shizuku.dex'"
+
+# ④ 开 allow-external-apps（不开则 rish 无法被外部调起）
+#    files/home/.termux/termux.properties 写：allow-external-apps = true
+
+# ⑤ 首次跑一次 rish，走「始终允许」授权（只需一次，之后记住）
+#    首次会返回 Request timeout ... may be blocked by your system
+#    原因不是超时，是弹了 RequestPermissionActivity 没人点。点完「始终允许」后：
+#    rish -c id  →  uid=2000(shell) gid=2000(shell) ...
+
+# ⑥ 关掉幻影进程杀手（否则 rish 进程会被系统当幽灵进程杀）
+adb shell settings put global settings_enable_monitor_phantom_procs false
+
+# ⑦ doze 白名单
+adb shell dumpsys deviceidle whitelist +com.termux
+adb shell dumpsys deviceidle whitelist +com.termux.boot
+adb shell dumpsys deviceidle whitelist +moe.shizuku.privileged.api
+
+# ⑧ 放开机脚本
+#    files/home/.termux/boot/00-oaid-kill.sh  chmod 700
+```
+
+### 4. 五个坑，按踩到的顺序
+
+**坑 1：`adb install` 卡六分钟没有任何输出**
+不是慢，是 ColorOS 弹了 `com.oplus.appdetail/...InstallGuideActivity`（「检测结果：涉及敏感权限」）在等人点。用 `uiautomator dump` 读出「继续安装」的 bounds，再 `input tap` 点掉即可。
+
+**坑 2：Termux 首次启动要等 bootstrap 解包**
+`run-as com.termux ls files/usr/bin` 第 3 次轮询（约 9 秒）才有东西。急着推脚本会写进一个空目录。
+
+**坑 3：第一次重启后 Termux:Boot 完全没触发**
+日志一条新记录都没有。根因是 AOSP 规则：`stopped=true notLaunched=true` 的应用**收不到 BOOT_COMPLETED**。`com.termux.boot` 装完从没启动过，就是 stop 状态。
+修法：`monkey -p com.termux.boot 1` 启动一次 `BootActivity`，状态变 `stopped=false notLaunched=false` 之后才会收广播。这一条是整轮里最隐蔽的。
+
+**坑 4：`rish` 首次调用返回 `Request timeout`，看着像连不上**
+真实原因是 Shizuku 弹了 `RequestPermissionActivity`（「要允许 Termux 使用 Shizuku 吗？」），没人点就等超时。点「始终允许」后立刻 `uid=2000(shell)`。
+排查时容易走偏：查进程 `state=S`、查 cgroup `freezer:/` 未冻结、亮屏也不管用——都不是原因，**弹窗没点**才是。
+附带的坑：锁屏状态下 `input keyevent` / `input swipe` 全部无效，必须先解锁（还要先关掉 USB 用途选择框）才能操作。
+
+**坑 5：`device_config put activity_manager_native_boot max_phantom_processes` 被拒**
+报 `SecurityException: Permission denial for flag ... allowlist permission granted, but must add flag to the allowlist`。shell 身份也改不了这个 flag。
+能用的是 `settings put global settings_enable_monitor_phantom_procs false`，它对应日志里那行 `Process PhantomProcessRecord {... rish/u0a292} died`。
+
+### 5. 开机脚本干的事
+
+脚本随仓库一起放在 [`scripts/termux-boot-00-oaid-kill.sh`](scripts/termux-boot-00-oaid-kill.sh)（1785 B，与机内文件 md5 一致 `fe5ffdb294e3701fbd7e3bbc2bdf74f6`），部署到 `~/.termux/boot/00-oaid-kill.sh`，chmod 700。逻辑三段：
+
+| 阶段 | 做什么 | 为什么 |
+|------|--------|--------|
+| 等待 | 每 15 秒 `rish -c id`，最多 40 次（10 分钟） | Shizuku server 起来有时间差，实测 attempt 0~1 就绪 |
+| 阶段 1 | **每 15 秒双杀 20 轮**（前 5 分钟） | 开机是竞态高发期：快应用平台先起，然后查 `OAIDStatusProvider` 把 openid 拉活，砍早了没用 |
+| 阶段 2 | 每 2 分钟巡检 15 次（30 分钟），发现复活再双杀 | 兜住延迟唤醒 |
+| 收尾 | 记录 `openid_pid` / `ids_provider` 计数 | 留证据，不必开电脑看 |
+
+双杀的对象固定两个：`com.heytap.openid` + `com.nearme.instant.platform`。只杀前者会被后者的 binder 连接吊回来。
+
+推送方式（`run-as` 避免 `/sdcard` 中转的权限问题）：
+
+```bash
+adb push scripts/termux-boot-00-oaid-kill.sh /sdcard/00.sh
+adb shell "cat /sdcard/00.sh | run-as com.termux sh -c 'mkdir -p files/home/.termux/boot && cat > files/home/.termux/boot/00-oaid-kill.sh && chmod 700 files/home/.termux/boot/00-oaid-kill.sh'"
+adb shell "run-as com.termux md5sum files/home/.termux/boot/00-oaid-kill.sh"   # 核对 md5
+```
+
+### 6. 实测时间线（第四次重启，18:52:38）
+
+```
+===== 2026-11-14 18:52:38 boot =====
+[18:52:54] rish ready (attempt 1)          ← 开机后 16 秒拿到 shell 身份
+[18:58:11] phase1 done (20 轮双杀)
+（阶段 2 巡检中，至 19:28 结束）
+```
+
+| 检查 | 结果 |
+|------|------|
+| `pidof com.heytap.openid` | 空 |
+| `pidof com.nearme.instant.platform` | 空 |
+| `dumpsys activity providers \| grep -c ids_provider` | 0 |
+| Shizuku 界面 | 「Shizuku 正在运行 / 版本 13.5，adb / 已授权 1 个应用」 |
+
+全程**没有碰过手机**。
+
+### 7. 三条硬前提（少一条就退化回手动）
+
+1. **必须连 WiFi**。Shizuku 靠 `adb_wifi_enabled=1` 自启，断网时日志明写 `Not connected to any wireless network. Not enabling adbwifi.`——server 不启动，rish 等 10 分钟超时，脚本 `exit 1`。
+2. **`adb_wifi_enabled` 要保持 1**。这是持久设置，但恢复出厂 / 关开发者选项会清掉。
+3. **配对凭据要留着**。`/data/misc/adb/adb_keys` 与 Shizuku 自己的配对记录丢了就得重新配对（那一步必须电脑在场）。
+
+另外：`com.termux.boot` 的 `RECEIVE_BOOT_COMPLETED` 必须是 `granted=true`；Termux 侧 `allow-external-apps = true` 必须开着。这两条已固化，重装 Termux 后要重做。
+
+### 8. 回滚
+
+```bash
+# 停用开机脚本（保留文件，改天想用再改回来）
+adb shell "run-as com.termux mv files/home/.termux/boot/00-oaid-kill.sh files/home/00-oaid-kill.sh.bak"
+
+# 恢复幻影进程监控（系统默认行为）
+adb shell settings put global settings_enable_monitor_phantom_procs true
+
+# 撤 doze 白名单
+adb shell dumpsys deviceidle whitelist -com.termux
+adb shell dumpsys deviceidle whitelist -com.termux.boot
+adb shell dumpsys deviceidle whitelist -moe.shizuku.privileged.api
+
+# 彻底不用就卸掉 Termux 与 Termux:Boot（会自动连带清掉 boot 脚本目录）
+adb uninstall com.termux.boot
+adb uninstall com.termux
 ```
