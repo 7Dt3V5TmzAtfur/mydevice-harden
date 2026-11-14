@@ -1317,3 +1317,193 @@ pm default-state --user 0 com.heytap.market  # → enabled=0（真正出厂态�
 **教训**：`pm suspend` 的杀伤力和 `pm uninstall` 在用户感知上是等价的（都不见了），
 但恢复成本差别很大——挂起只要一条 `unsuspend`，卸载要 `install-existing`。
 所以批量屏蔽预装应用时，**对用户可能真要用到的功能应用（商店、文件管理、天气）宁可用「限后台」也别用 suspend**。
+
+---
+
+## 附五：OAID 归零试到墙 + 广告开关收尾 + 一键脚本 + 重启回归（2026-11-14 收官）
+
+### 1. 本轮四项完成度
+
+| # | 任务 | 结果 | 一句话 |
+|---|------|------|--------|
+| ① | 清 Opex + 继续砍广告 | ✅ | Opex 状态位本来就是 0；广告键 13 个里 8 个本就为 0，改了 5 个 + 撤 3 处权限 |
+| ② | OAID 归零 | ⚠️ 部分 | 只能做到「系统拒绝启动」，无法禁用/卸载（保护名单，同 OTA） |
+| ③ | 一键复原脚本 | ✅ | `scripts/apply-tier2.sh` + `scripts/rollback.sh`，全量可逆，含 dry-run |
+| ④ | 重启回归验证 | ✅ | 22 禁用 / 12 挂起 / 设置项全部持久；Shizuku 重启后**自动**起来了 |
+
+### 2. OAID 归零：三条路全撞墙，天花板是「挂起 + 开机后手动杀一次」
+
+目标包：`com.heytap.openid`（`/product/priv-app/OpenID`，v5.0.19，持 `QUERY_ALL_PACKAGES`）。
+真正的 OAID 出口是它注册的 ContentProvider：**authority `com.oplus.omes.ids_provider` → `com.heytap.openid/.StdProvider`**，
+另有 Service `com.heytap.openid/.IdentifyService`。SDK 通过这两个入口取 OAID。
+
+三条路逐条实测：
+
+| 手段 | 命令 | 返回 | 判定 |
+|------|------|------|------|
+| 包级禁用 | `pm disable-user --user 0 com.heytap.openid` | `new state: default`，`enabled` 仍为 0 | ❌ 被降级，没生效 |
+| 用户级卸载 | `pm uninstall --user 0 com.heytap.openid` | `Failure [DELETE_FAILED_INTERNAL_ERROR]` | ❌ 拒绝 |
+| 组件级禁用 | `pm disable --user 0 com.heytap.openid/.StdProvider` | `SecurityException: Shell cannot change component state for ComponentInfo{...} to 2` | ❌ 同 OTA 的 null 异常，同一份保护名单 |
+
+> 注意第三个异常和 OTA 那个 `Shell cannot change component state for **null** to 2` 是**同一句**，
+> 区别只是这里 ComponentInfo 没被抹成 null。说明 ColorOS 有一份「shell 不可改」的组件名单，OTA 和 OpenID 都在里面。
+
+**挂起是有效的，而且有铁证**：直接启动它的 Activity 时，系统弹出原生界面
+`android/com.android.internal.app.SuspendedAppActivity`，文案是
+> 应用无法使用 / OpenID 目前无法使用。该应用是由 Shell 所管理。 / 确定
+
+这说明 `pm suspend` 在系统层面确实把它拦死了（不是「看起来没跑」），OAID 请求会被系统拒绝。
+
+**但挂起挡不住「按需唤醒」**，两个证据：
+
+```
+# ① 重启后它自己起来了（挂起标志在设置里，但进程启动比标志生效更早）
+重启后 ps → 6534 com.heytap.openid   （重启前是 21418）
+
+# ② 一次 content 查询就把它唤醒
+adb shell content query --uri content://com.oplus.omes.ids_provider
+→ 进程从 0 变 11257
+```
+
+`am force-stop` 之后 60 秒观察，**没有再自启**（进程数 0）。所以实际可用的方案是：
+
+```bash
+# 每次开机后执行一次（或写进 Tasker / 开机脚本）
+adb shell am force-stop com.heytap.openid
+```
+
+**诚实结论**：无 root 情况下，OAID **做不到真正归零**，只能做到「默认状态下不可用、被查询时可能被唤醒」。
+要做到恒定全零，只能靠 ColorOS 设置里的官方开关或 root 改 provider。代价：个别三方 SDK 拿不到 OAID
+会返回 null 或走超时分支（多数 SDK 有兜底，实测软件商店首页仍正常加载）。
+
+### 3. 广告/推荐开关：13 个键里 8 个本来就是 0
+
+全量扫 `settings list`（关键词 `ad|ads|recommend|push|splash|banner|promot|hotword|opex`）后的实况：
+
+| 键 | 命名空间 | 改前 | 改后 | 说明 |
+|----|---------|------|------|------|
+| `ad_defender_switch` | secure | 0 | 0 | 广告拦截，出厂就关 |
+| `key_recommend_service` | secure | 0 | 0 | 推荐服务总开关 |
+| `recommend_permission_enabled` | secure | 0 | 0 | 推荐权限 |
+| `recommend_support` | secure | 0 | 0 | 推荐能力 |
+| `recommend_notification_status` | secure | 0 | 0 | 推荐通知 |
+| `key_com_opos_ads_user_permission` | secure | 0 | 0 | 广告 SDK 用户授权 |
+| `key_heytap_market_strengthen_service` | secure | 0 | 0 | 商店增强服务 |
+| `folder_content_recommend_support` | secure | `folderRecommendEnable:0` | 0 | 桌面文件夹推荐位（3 个 recommendId 全 status 0） |
+| **`key_enhance_service_browser`** | secure | **1** | **0** | 浏览器增强服务（推荐位来源） |
+| **`recommend_notify_interval`** | global | **3** | **0** | 推荐通知轮询间隔 |
+| **`wifi_scan_always_enabled`** | global | **1** | **0** | 「Wi-Fi 始终扫描」，关掉少一路位置推断 |
+| **`com.heytap.market...show.new.user.notification`** | secure | **true** | **false** | 商店新用户推送 |
+| `network_recommendations_enabled` | global | 1 | **1（写不进）** | 写入 1 秒后就被系统写回 1，无法改 |
+
+**两个新坑**：
+
+1. `cmd appops set <pkg> POST_NOTIFICATION ignore` 对 `com.heytap.music`、`com.coloros.weather2` **无效**
+   （读回仍是 `allow`，因为这两个包当时没有 op 记录，写入被忽略）。必须用 `pm revoke <pkg> android.permission.POST_NOTIFICATIONS`，
+   revoke 后 `dumpsys` 里能看到 `granted=false`。
+2. **`com.coloros.weather2` 自己还持着精确定位**。上一轮只撤了 `com.coloros.weather.service`（后台服务），
+   App 本体仍是 `ACCESS_FINE_LOCATION/COARSE_LOCATION granted=true`。本轮补齐撤销：
+
+```
+-- 撤销前
+ACCESS_FINE_LOCATION: granted=true, flags=[USER_SET|...]
+-- 撤销后
+ACCESS_FINE_LOCATION: granted=false
+ACCESS_COARSE_LOCATION: granted=false
+ACCESS_BACKGROUND_LOCATION: granted=false（本来就 false）
+```
+
+同类补齐：`com.heytap.browser` 也仍持 FINE/COARSE（挂起中，但权限在），一并撤销；
+`com.heytap.music` 撤通知；`com.heytap.tas`、`com.coloros.weather.service` 复核为「无敏感权限 granted」。
+
+**软件商店回归测试**（禁用 openid 后必须验）：`force-stop` 后冷启，首页正常渲染
+（抖音/红果/快手/小红书/汽水音乐 等卡片全出），无「错误/失败/无法/异常/重试」字样，进程存活 1 个。**结论：openid 挂起不伤商店。**
+
+### 4. 一键脚本：`scripts/apply-tier2.sh` 与 `scripts/rollback.sh`
+
+| 文件 | 作用 | 关键设计 |
+|------|------|---------|
+| `scripts/apply-tier2.sh` | 在一台干净同型号机上复现整套加固 | 22 禁用 + 1 卸载 + 12 挂起 + force-stop + 定位/通知撤销 + 广告开关 + Opex 清零 + Shizuku 通知授权与 doze 白名单；每步回读校验，键写不进去会打 `!! 回读=x` |
+| `scripts/rollback.sh` | 全量复原 | `unsuspend` + `default-state` + `enable` + `install-existing`；设置项用 `settings delete` 回落系统默认（不猜默认值）；权限 grant 回去；`--strict` 连 Shizuku 授权一起撤 |
+| `.gitattributes` | 强制 `*.sh` 用 LF | 否则 Windows 检出后 CRLF，Linux 上跑会 `bad interpreter` |
+
+两个脚本都支持 `--dry-run`（只打印不执行），已实测 dry-run 输出正常。
+
+### 5. 本轮最值得记的坑：「禁用包数」三个命令给出三个不同答案
+
+同一个时刻，三种统计方式：
+
+```
+adb shell pm list packages -d --user 0        → 21
+adb shell pm list packages -d -u --user 0     → 22
+adb shell dumpsys package | grep 'User 0: ceDataInode' | grep -c 'enabled=3'  → 22
+```
+
+差异来源，三类各一例：
+
+| 包 | 真实状态 | 为什么口径不一致 |
+|----|---------|-----------------|
+| `com.coloros.regservice` | `enabled=3` 真禁用 | `pm list -d` **漏报**它（不带 `-u` 时不出现在列表里） |
+| `com.oplus.onetrace` | `installed=false enabled=3` | 早期是**卸载**（用户级），只剩一个空壳，`enabled=3` 会被误算作「禁用」 |
+| `com.android.virtualization.terminal` | `enabled=0` | manifest 内自带 `android:enabled="false"`，`pm list -d` 算它「禁用」，但 dumpsys 里 `enabled` 恒为 0，`pm disable` 只会回 `new state: default` |
+
+**结论**：以后一律以 `dumpsys` 的 `enabled=` 字段为唯一判据，别信 `pm list packages -d` 的行数。
+
+### 6. 重启回归验证（18:03:40 重启 → boot_completed 约 24 秒）
+
+| 项 | 重启前 | 重启后 | 结论 |
+|----|--------|--------|------|
+| 禁用标记 `enabled=3` | 22 | 22 | ✅ 持久 |
+| 挂起 `suspended=true` | 12 | 12 | ✅ 持久 |
+| `ota_disable_automatic_update` | 1 | 1 | ✅ |
+| `wifi_scan_always_enabled` | 0 | 0 | ✅ |
+| `key_enhance_service_browser` | 0 | 0 | ✅ |
+| `recommend_notify_interval` | 0 | 0 | ✅ |
+| `com.oplus.opex.detected_status` | 0 | 0 | ✅ |
+| `adb_wifi_enabled` | 1 | 1 | ✅ 无线调试开着，Shizuku 才有条件自启 |
+| **Shizuku** | server 18062 | **server 10397 自动起来** | ✅ 界面：`Shizuku 正在运行 / 版本 13.5，adb / 已授权 1 个应用` |
+| OTA 通知 | 无 | **无** | ✅ 只有 channel 配置残留（`mDeleted=true, mDeletedByMcs=true`），没有「发现新版本」推送 |
+| 云控 `com.oplus.sau` | 5977/31698 在跑 | **不在跑** | ✅ 已压住 |
+| 云控 `com.oplus.olc` | 5977 | **5977（同一个 PID）** | ❌ 杀不动，见下一节 |
+| 云控 `com.heytap.openid` | 21418 | 6534 复活 → force-stop 后 0 | ⚠️ 开机竞态复活一次，杀掉即静 |
+
+**Shizuku 这条要单独说**：你的诉求是「重启后进 App 点一下『启动』，不用配对」。实测结果是
+**连点都不用点**——重启后服务端已经在了（PID 10397），界面直接显示「正在运行」。
+原因是 `adb_wifi_enabled=1` 持久 + 配对凭据已存，Shizuku 在开机时自己把 server 拉起来了。
+前提仍然是**必须连着 WiFi**（`AdbDebuggingManager: Not connected to any wireless network. Not enabling adbwifi.`）。
+
+### 7. `com.oplus.olc`：三重拒绝，没 root 就别想了
+
+身份：`/system_ext/app/Olc`，v16.0.68，`pkgFlags=[SYSTEM HAS_CODE PERSISTENT ALLOW_CLEAR_USER_DATA]`，**uid 1000**。
+
+| 手段 | 结果 |
+|------|------|
+| `pm suspend --user 0 com.oplus.olc` | `new suspended state: **false**`（拒绝，同 OTA） |
+| `pm disable-user --user 0 com.oplus.olc` | `new state: default`，`enabled` 仍 0 |
+| `am force-stop com.oplus.olc` | exit 0 但 **PID 5977 纹丝不动**（连重启都不给） |
+| `cat /proc/5977/cgroup` | `5:freezer:/`（未冻结）, `0::/system/uid_1000/pid_5977` |
+
+**结论**：`PERSISTENT` + uid 1000 的系统组件，shell 权限下完全不可动，只能记录在案。
+它的功能是日志采集上报（崩溃/反馈日志），属隐私相关但**不影响去广告与云控主线**。
+
+### 8. 本轮回滚
+
+```bash
+# 一键全量复原（含设置项回落默认、权限恢复、被卸载包 install-existing）
+bash scripts/rollback.sh
+
+# 只看会做什么，不动设备
+bash scripts/rollback.sh --dry-run
+
+# 连 Shizuku 的通知授权与 doze 白名单也撤（默认保留）
+bash scripts/rollback.sh --strict
+
+# 只回滚本轮新增的两项
+adb shell pm unsuspend --user 0 com.heytap.openid
+adb shell settings put secure key_enhance_service_browser 1
+adb shell settings put global recommend_notify_interval 3
+adb shell settings put global wifi_scan_always_enabled 1
+adb shell settings put secure com.heytap.market.settings.pref.show.new.user.notification true
+adb shell pm grant com.coloros.weather2 android.permission.ACCESS_FINE_LOCATION
+adb shell pm grant com.coloros.weather2 android.permission.ACCESS_COARSE_LOCATION
+```

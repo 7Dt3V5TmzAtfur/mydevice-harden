@@ -3,7 +3,10 @@
 四台设备的免 root / 有 root 加固实录：怎么定位国产定制系统里的「云控」与系统广告链路，
 以及在**不同权限边界下**分别能做到哪一步、哪一步做不到。
 
-不是包名清单分享，也不是一键脚本。**每台设备的规则都不可互换**，可复用的只有方法论。
+不是包名清单分享。**每台设备的规则都不可互换**，可复用的只有方法论。
+唯一的例外是 [#4 OPPO](OPPOA7ProMax-PYC110.md) 的 `scripts/`——它把这台的完整改动做成了
+可 `--dry-run` 的一键脚本与全量回滚，因为那台机器没有 root、每一步都得靠 shell 权限硬磕，
+手工重放成本太高。
 
 ## 设备一览
 
@@ -12,7 +15,7 @@
 | 1 | 小米平板 5 Pro 11″<br>`M2105K81AC` / elish | Android 13<br>MIUI `V14.0.3.0.TKYCNXM` | ✅ Magisk 26.1<br>BL 已解锁 | hosts 24,936 行<br>+ iptables | disable 24<br>+ uninstall 1 | [小米平板5Pro-M2105K81AC.md](小米平板5Pro-M2105K81AC.md) |
 | 2 | 荣耀 Magic Vs2<br>`VER-AN00` | Android 13<br>MagicOS `7.2.0.125` | ❌ 无<br>BL 锁定 | ✗ 不可写 | disable 15<br>+ settings 1 | [荣耀MagicVs2-VER-AN00.md](荣耀MagicVs2-VER-AN00.md) |
 | 3 | Redmi K30 4G<br>`phoenix` | Android 12<br>MIUI `V13.0.6.0.SGHCNXM` | ✅ Magisk 31.1<br>BL 已解锁 | hosts 80 条<br>+ iptables | disable 8 + uninstall 2<br>+ 预装清退 15 | [RedmiK30-4G-phoenix.md](RedmiK30-4G-phoenix.md) |
-| 4 | OPPO A7 Pro Max<br>`PYC110` | Android 16<br>ColorOS `V16.1.0` | ❌ 无<br>**BL 不可解锁** | ✗ | uninstall 12 + suspend 5<br>+ stopped 1 | [OPPOA7ProMax-PYC110.md](OPPOA7ProMax-PYC110.md) |
+| 4 | OPPO A7 Pro Max<br>`PYC110` | Android 16<br>ColorOS `V16.1.0`<br>`PYC110_16.0.9.409(CN01)` | ❌ 无<br>**BL 不可解锁** | ✗ | disable 22 + uninstall 1<br>+ suspend 12<br>+ Shizuku 免电脑自启 | [OPPOA7ProMax-PYC110.md](OPPOA7ProMax-PYC110.md) |
 
 四台跨了小米 / 荣耀 / Redmi / OPPO 四个厂商，Android 12 / 13 / 16 三个大版本，
 有 root 与无 root 各两台——这个组合正好能把「哪些结论是通用的、哪些只是某台设备的特例」分开。
@@ -72,7 +75,7 @@ OPPO 是 `com.oplus.statistics.rom` / `com.oplus.onetrack` / `com.oplus.deepthin
 | [小米平板 5 Pro](小米平板5Pro-M2105K81AC.md) | `PERSISTENT` 应用 `disable-user` 无效、`kill -9` 会 4 秒复活，必须 `uninstall --user 0` |
 | [荣耀 Magic Vs2](荣耀MagicVs2-VER-AN00.md) | `hiview` 是三层结构，禁用应用层只关掉三分之一，native 与 vendor 层无 root 就是无解 |
 | [Redmi K30 4G](RedmiK30-4G-phoenix.md) | 装了 PIF 的机器 `ro.boot.*` 全部不可信，判断 BL 状态只能 `fastboot getvar unlocked` |
-| [OPPO A7 Pro Max](OPPOA7ProMax-PYC110.md) | 用一个包的五次失败去否定全局策略，会让 12 个本可卸载的包被错误地降级为"只能冻结" |
+| [OPPO A7 Pro Max](OPPOA7ProMax-PYC110.md) | 「禁用包数」有三个答案：`pm list -d`=21、加 `-u`=22、`dumpsys enabled=3`=22。只信 dumpsys |
 
 ## 复现
 
@@ -83,8 +86,9 @@ OPPO 是 `com.oplus.statistics.rom` / `com.oplus.onetrack` / `com.oplus.deepthin
 MSYS_NO_PATHCONV=1 adb shell uiautomator dump /sdcard/ui.xml
 
 # 卸载前一定先做状态快照，回滚全靠它
-adb shell pm list packages -d > disabled-before.txt
-adb shell pm list packages -s > enabled-before.txt
+# 注意：pm list packages -d 会漏报（OPPO 实测少 1 个），快照请用 dumpsys
+adb shell dumpsys package | awk '/^  Package \[/{p=$2} /^    User 0: ceDataInode/ && /enabled=3/{print p}' > disabled-before.txt
+adb shell dumpsys package | awk '/^  Package \[/{p=$2} /suspended=true/{print p}' > suspended-before.txt
 
 # 回滚：disable 的用 enable，uninstall 的用 install-existing
 adb shell pm enable --user 0 <pkg>
@@ -107,6 +111,9 @@ README.md                        本文件
 荣耀MagicVs2-VER-AN00.md          #2 HONOR VER-AN00
 RedmiK30-4G-phoenix.md            #3 Redmi K30 / phoenix
 OPPOA7ProMax-PYC110.md            #4 OPPO PYC110
+.gitattributes                    强制 *.sh 用 LF（否则 Windows 检出后脚本跑不起来）
+scripts/apply-tier2.sh            #4 一键应用（22 禁用 + 1 卸载 + 12 挂起 + 权限/设置 + Shizuku）
+scripts/rollback.sh               #4 一键全量复原（默认保留 Shizuku，--strict 连它一起撤）
 ```
 
 每份文档结构一致：**型号参数版本 → 目标 → 已落地方案 → 踩过的坑**。
