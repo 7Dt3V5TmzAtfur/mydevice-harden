@@ -51,17 +51,30 @@ while [ $n -lt 20 ]; do
 done
 echo "[$(date +%T)] phase1 done ($n 轮双杀)"
 
-# 阶段2: 之后 30 分钟每 2 分钟巡检，发现复活再杀
+# 阶段2: 稀疏兜底。20 分钟、每 30 秒一次（共 40 次）。
+#   数据来源（八次重启）: openid 被唤醒的时刻是 T+3.9 / 3.9 / 3.95 / **12.3** 分钟
+#   —— 第四次（08 次重启）晚了整整 8 分钟，说明这个时机不是固定值，
+#   跟负一屏/OTA 界面被拉起的节奏有关，会随手机会话而变化。
+#   两次教训:
+#     ① 砍到 5 分钟会直接漏掉 T+12min 那种情况 -> 窗口必须比已观测值宽。
+#     ② 稀疏到 60 秒代价太大: 那一轮 openid 存活了 80 秒（15 秒档只有 3.4~6.8 秒）。
+#   所以选 30 秒档: 活口上限 30 秒，总窗口覆盖到 T+25 分钟，Termux 常驻约 25 分钟。
 m=0
-while [ $m -lt 15 ]; do
-  sleep 120
+while [ $m -lt 40 ]; do
+  sleep 30
   if [ -n "$(rish -c 'pidof com.heytap.openid')" ]; then
     echo "[$(date +%T)] 复活，再双杀"
     rish -c "$KILL" >/dev/null 2>&1
   fi
   m=$((m+1))
 done
+echo "[$(date +%T)] phase2 done ($m 轮兜底)"
 
 PID=$(rish -c 'pidof com.heytap.openid' 2>/dev/null)
 PROV=$(rish -c 'dumpsys activity providers | grep -c ids_provider' 2>/dev/null)
 echo "[$(date +%T)] final: openid_pid=[$PID] ids_provider=[$PROV]"
+
+# 到此脚本结束 -> Termux:Boot 启动的 TermuxService 停止 -> com.termux 进程被系统回收。
+# 不需要手动 force-stop: 用 force-stop 会把 com.termux 置为 stopped 状态，
+# 反而给下一次 Termux:Boot 触发埋隐患。Shizuku server 是独立进程，不受影响。
+echo "[$(date +%T)] script exit"
