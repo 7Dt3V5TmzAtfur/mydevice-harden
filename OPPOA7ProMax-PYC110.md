@@ -1715,10 +1715,10 @@ adb shell pm grant com.coloros.weather2 android.permission.ACCESS_COARSE_LOCATIO
 
 | 项 | 之前 | 现在 |
 |----|------|------|
-| 启动 Shizuku server | 进 App 点「启动」（附四已做到不用配对） | **完全不用碰**，开机自起 |
+| 启动 Shizuku server | 进 App 点「启动」（附四已做到不用配对） | **8 次开机成功、第 9 次失败**——非 root 下是概率事件，见 §7.2 |
 | Shizuku 授权 | 首次弹「要允许 Termux 使用 Shizuku 吗」需点「始终允许」 | 已记住，不再弹 |
-| 压制 `com.heytap.openid` | 开机后手动 `am force-stop` | **Termux:Boot 脚本自动双杀 + 30 分钟巡检** |
-| 用户开机后要做的动作 | 2~3 步 | **0 步**（前提：连着 WiFi） |
+| 压制 `com.heytap.openid` | 开机后手动 `am force-stop` | **Termux:Boot 脚本自动双杀 + 30 分钟巡检**（前提是那一轮 rish 拿到了） |
+| 用户开机后要做的动作 | 2~3 步 | **多数时候 0 步**；Shizuku 那轮没自启时仍需点一次「启动」（约 1 秒） |
 
 ### 2. 选型：为什么是 Termux + Termux:Boot + rish
 
@@ -1845,15 +1845,98 @@ adb shell "run-as com.termux md5sum files/home/.termux/boot/00-oaid-kill.sh"   #
 
 全程**没有碰过手机**。第 5、6、7 次共三次重启都是同一个结论：`rish ready (attempt 0)`，即开机后 1~2 秒就拿到 shell 身份。
 
-### 7. 三条硬前提（少一条就退化回手动）
+### 7. 第九次重启（19:59:13 发起）：一成一败
 
-1. **必须连 WiFi**。Shizuku 靠 `adb_wifi_enabled=1` 自启，断网时日志明写 `Not connected to any wireless network. Not enabling adbwifi.`——server 不启动，rish 等 10 分钟超时，脚本 `exit 1`。
+这一轮同时验证两件事：OTA 断根、20min×30s 参数。结论是**一成一败**，而失败的那件比参数重要得多。
+
+#### 7.1 OTA「自己回前台」已断根（成功）
+
+重启前做了两步：
+
+```bash
+adb shell am force-stop com.oplus.ota      # rc=0，但任务记录纹丝不动
+adb shell am stack remove 1484             # 唯一能删掉 isPersistable=true 任务的方式
+```
+
+两个坑值得记：`am task remove` 在这台机器上是 `Error: unknown command 'remove'`；`am stack remove <taskId>` 才是能用的那条（不要被名字误导，它接受的是 task id）。
+
+重启后 0~11 分钟复查：
+
+| 检查 | 结果 |
+|------|------|
+| `dumpsys activity recents \| grep -c com.oplus.ota` | **0**（重启前是 1 条持久化任务） |
+| `pidof com.oplus.ota` | 空（11 分钟时仍空） |
+| `wm_create_activity` / `Recent #0` | 不再出现 |
+
+**但「不起进程」没买到。** 开机 20 秒后它照样被广播唤起：
+
+```
+19:59:36.995 am_proc_start [0,9658,10256,com.oplus.ota,broadcast,
+  {com.oplus.ota/com.oplus.ota.strategy.StrategyReceiver},
+  {callingUid = 1000, callingAction = android.intent.action.BOOT_COMPLETED}]
+```
+
+所以这一步买到的是「**不自己弹到前台**」，不是「不起进程」。根因也确认了：那条任务带 `isPersistable=true` + `autoRemoveRecents=false`，被写进 `recent_tasks`，每次开机被原样恢复——这和「重新联网检测」没有任何关系。
+
+#### 7.2 Shizuku 自启失败（本轮最重要的反例）
+
+```
+19:59:31.634 am_proc_start [0,8855,10289,moe.shizuku.privileged.api,broadcast,
+  {moe.shizuku.privileged.api/moe.shizuku.manager.receiver.BootCompleteReceiver},
+  {callingUid = 1000, callingAction = android.intent.action.LOCKED_BOOT_COMPLETED}]   ← 接收器被拉起了
+19:59:40                脚本启动（Termux:Boot）
+19:59:40 → 20:09:50     整 10 分钟 pidof shizuku_server 一直为空
+                        期间 rish 每 15 秒一次，全部 W/ShizukuManager: Binder not received
+20:09:50                rish ready (attempt 39)  ← 最后一轮才拿到
+```
+
+而 `attempt 39` 不是等来的，是**人在界面上点了 Shizuku「启动」之后 10 秒**碰巧赶上的。没点的话第 40 次就 `FATAL: rish 不可用` 退出，整轮零保护。
+
+失败机理，三条证据：
+
+1. **Shizuku 自己写在界面里**：「通过连接电脑启动（使用 adb）……这个过程**每次设备重新启动后需要重新进行**」。
+2. **dex 里印证启动链**：`moe.shizuku.starter.ServiceStarter --token=` + `moe.shizuku.manager.starter.StarterActivity`——发起方必须是 shell（uid 2000），binder 通过 token 递回 App。Termux 是 uid 10292、无 su，**永远无法代劳**。
+3. **唯一被验证能拉起 server 的动作**，就是人在 Shizuku 界面点「启动」。点完 10 秒内 `shell 13160 shizuku_server` 就起来了（`PPid=1`，已 daemonize）。
+
+排除项（都是查过才排除的）：
+
+| 怀疑 | 实测 | 结论 |
+|------|------|------|
+| doze 白名单没加 | `cmd deviceidle whitelist` 里有 `user,moe.shizuku.privileged.api,10289` | 本来就在 |
+| 后台被限制 | `cmd appops get ... RUN_IN_BACKGROUND` = `allow` | 正常 |
+| 无线调试没开 | `adb_wifi_enabled=1`，实际在听 `192.168.50.170:44253` | 通 |
+| 没连 WiFi | SSID `110`，`wlan0` 有 192.168.50.170 | 通 |
+| `service.adb.tls.port` 空 → 没监听 | 该 prop 在这台机器上不反映无线调试状态 | 误判，撤掉 |
+
+真实原因更可能是：**慢启动 + 系统冻结**。那次开机 load average 19.5，Shizuku 进程 19:59:31 起来，`20:00:08` 就被 `am_freeze 8855` 冻住——它连无线调试、spawn server 这套动作还没走完。之后 rish 每 15 秒 `am_unfreeze ... for 3`（只放开 3 秒），而 Shizuku 不会在 resume 时重试启动，于是永久卡死。
+
+已试过但无效的「无人补救」：
+
+- `am start -n .../MainActivity`：熄屏状态下 45 秒无任何反应（`intent has been delivered to currently running top-most instance`，没有真正的 resume）
+- `setprop persist.adb.tls_server.enable 1`：`PROP_ERROR_PERMISSION_DENIED`，SELinux 拦住 `persist.*`
+- `wm dismiss-keyguard`：有安全锁屏时无效
+
+**结论（写死，避免以后再给自己虚假信心）**：「开机零手动」在非 root 上是**概率事件，不是保证**。前 8 次都 `rish ready (attempt 0~1)`（开机 1~17 秒），第 9 次直接失败——同一个脚本、同一台机器、同一套配置。脚本能做的只有「等得更久 + 起来后立刻先杀一刀」，**不能替 Shizuku 启动**。
+
+#### 7.3 顺带抓到三条新边（以前没记录）
+
+| 时刻 | 事件 | 意义 |
+|------|------|------|
+| 19:59:18.697 | `openid` 被 `callingPackage = com.android.launcher` 直接查 `OAIDStatusProvider` | 开机 **5 秒**，比 Termux 启动早 22 秒——**这一刀无论如何拦不住** |
+| 19:59:21.868 | `instant:provider` 的 `InstantProvider` 被 `com.oplus.notificationmanager` 拉起 | 又一条不经过负一屏的上游 |
+| 20:10:45.694 | `openid` 被 `callingPackage = com.heytap.pictorial` 拉起 | 新的 OAID 调用方（系统画报/相册） |
+
+第一条尤其要记住：脚本的作用从来不是「让它不被唤醒」，而是「让每次唤醒只活几秒」。开机那第一刀永远在脚本之前。
+
+### 8. 三条硬前提（少一条就退化回手动）
+
+1. **必须连 WiFi**。Shizuku 靠 `adb_wifi_enabled=1` 自启，断网时日志明写 `Not connected to any wireless network. Not enabling adbwifi.`——server 不启动，rish 等超时，脚本退出。注意：连上 WiFi 也**不保证**能自启，见 §7.2。
 2. **`adb_wifi_enabled` 要保持 1**。这是持久设置，但恢复出厂 / 关开发者选项会清掉。
 3. **配对凭据要留着**。`/data/misc/adb/adb_keys` 与 Shizuku 自己的配对记录丢了就得重新配对（那一步必须电脑在场）。
 
 另外：`com.termux.boot` 的 `RECEIVE_BOOT_COMPLETED` 必须是 `granted=true`；Termux 侧 `allow-external-apps = true` 必须开着。这两条已固化，重装 Termux 后要重做。
 
-### 8. 回滚
+### 9. 回滚
 
 ```bash
 # 停用开机脚本（保留文件，改天想用再改回来）

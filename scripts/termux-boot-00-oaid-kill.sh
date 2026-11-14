@@ -19,6 +19,11 @@
 #      实测: 只杀 openid+instant 时每轮开机唤醒 1 次（存活约 6.8 秒）；
 #            加上杀 assistantscreen 后变成每 15~16 秒唤醒 1 次（06 次重启实测）。
 #      所以负一屏只能「挂起」（挡 UI），不能「反复杀」（会变成反向加压）。
+#   4) 开机那第一刀永远拦不住: 09 次重启实测 19:59:18.697，com.android.launcher
+#      直接查 openid 的 OAIDStatusProvider，比 Termux:Boot 启动（19:59:40）还早 22 秒。
+#      本脚本买的是「每次复活只活几秒」，不是「不复活」。
+#   5) 09 次重启还抓到两条新边: instant 的 InstantProvider 被 com.oplus.notificationmanager
+#      拉起（不经过负一屏）；openid 被 com.heytap.pictorial 拉起（新调用方）。
 # 因此击杀名单固定为两个: openid + instant.platform。
 # 2026-11-14
 H=/data/data/com.termux/files/home
@@ -30,16 +35,40 @@ export PATH=$H:$PATH
 
 KILL="am force-stop com.heytap.openid; am force-stop com.nearme.instant.platform"
 
-# 等 Shizuku server 起来（开机自动启动，与本脚本有先后竞争）。最长等 10 分钟。
+# 等 Shizuku server 起来（开机自动启动，与本脚本有先后竞争）。最长等 15 分钟。
+#
+# 【重要，别给自己虚假信心】非 root 下 Shizuku 自启是「概率事件」，不是保证：
+#   07 次重启及之前全部 attempt 0~1（开机 1~17 秒就拿到 shell）；
+#   09 次开机时 BootCompleteReceiver 照样在 LOCKED_BOOT_COMPLETED 被拉起（callingUid=1000），
+#   但 shizuku_server 整整 10 分钟没起来，最后是人点 Shizuku 界面「启动」后才通。
+#   排除过：doze 白名单本来就有、RUN_IN_BACKGROUND=allow、WiFi 在线、
+#           无线调试实际在听 192.168.50.170:44253 —— 都不是原因。
+#   真实原因更像「慢启动 + ColorOS 冻结」：那次 load 19.5，Shizuku 进程起来 37 秒后
+#   就被 am_freeze，连无线调试/spawn server 都没走完，而它 resume 时不会重试。
+#
+#   所以这里只能等，不能替它启动：启动链是
+#     moe.shizuku.starter.ServiceStarter --token=  + StarterActivity
+#   发起方必须是 shell(2000)，Termux 是 10292 且无 su，做不了。
+#   也试过但无效: 熄屏时 am start 主界面（45s 无反应）、setprop persist.adb.tls_server.enable（SELinux 拒）。
+T0=$(date +%s)
 i=0
-while [ $i -lt 40 ]; do
+while [ $i -lt 60 ]; do
   if rish -c "id" 2>/dev/null | grep -q "uid=2000"; then
-    echo "[$(date +%T)] rish ready (attempt $i)"
+    echo "[$(date +%T)] rish ready (attempt $i, 等待 $(( $(date +%s) - T0 ))s)"
     break
   fi
   i=$((i+1)); sleep 15
 done
-if [ $i -ge 40 ]; then echo "[$(date +%T)] FATAL: rish 不可用"; exit 1; fi
+if [ $i -ge 60 ]; then
+  echo "[$(date +%T)] FATAL: rish 15 分钟内不可用 —— Shizuku 这轮没自启"
+  echo "  人工补救: 解锁屏幕 -> 打开 Shizuku -> 点「启动」 -> 重跑本脚本"
+  exit 1
+fi
+
+# 拿到 shell 身份后立刻先杀一刀，别等第一轮循环：
+# 开机 5 秒时 com.android.launcher 就已经直接查过 OAIDStatusProvider（09 次重启实测
+# 19:59:18.697，比 Termux 启动早 22 秒），openid 大概率已经在跑。
+rish -c "$KILL" >/dev/null 2>&1
 
 # 阶段1: 前 5 分钟每 15 秒双杀一次
 #   为什么不是只在开机瞬间杀一刀: 复活发生在开机后约 4 分钟（负一屏延迟查询），
