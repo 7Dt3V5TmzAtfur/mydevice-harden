@@ -1715,10 +1715,10 @@ adb shell pm grant com.coloros.weather2 android.permission.ACCESS_COARSE_LOCATIO
 
 | 项 | 之前 | 现在 |
 |----|------|------|
-| 启动 Shizuku server | 进 App 点「启动」（附四已做到不用配对） | **8 次开机成功、第 9 次失败**——非 root 下是概率事件，见 §7.2 |
+| 启动 Shizuku server | 进 App 点「启动」（附四已做到不用配对） | **13 次开机里 10 成 3 败**——非 root 下是概率事件，且放行 ColorOS 也没能改善，见 §7.2 与**附八** |
 | Shizuku 授权 | 首次弹「要允许 Termux 使用 Shizuku 吗」需点「始终允许」 | 已记住，不再弹 |
 | 压制 `com.heytap.openid` | 开机后手动 `am force-stop` | **Termux:Boot 脚本自动双杀 + 30 分钟巡检**（前提是那一轮 rish 拿到了） |
-| 用户开机后要做的动作 | 2~3 步 | **多数时候 0 步**；Shizuku 那轮没自启时仍需点一次「启动」（约 1 秒） |
+| 用户开机后要做的动作 | 2~3 步 | **多数时候 0 步**；Shizuku 那轮没自启时仍需点一次「启动」（实测约 4 秒） |
 
 ### 2. 选型：为什么是 Termux + Termux:Boot + rish
 
@@ -1954,3 +1954,259 @@ adb shell dumpsys deviceidle whitelist -moe.shizuku.privileged.api
 adb uninstall com.termux.boot
 adb uninstall com.termux
 ```
+
+---
+
+## 附七：KSuRoot / GhostLock 实测评估——结论是「本机无路」，但理由和最初推断不同
+
+针对 `https://github.com/hmascs/KSuRoot` 做了完整实测（安装 → 读判定 → 挖载荷库 → 探构建通道）。**不是靠读 README 推断，是让工具自己给出对本机的判定。**
+
+### 1. 结论先行
+
+| 判断 | 结果 |
+|------|------|
+| 本机是否被 App 正确识别 | **是**，`OPPO A7 Pro Max 5G · OP620DL1` / `PYC110_16.0.9.409(CN01)` |
+| App 是否认为内核有漏洞 | **是**，内核行原话 `6.12.58 · 支持 GhostLock 免 ADB` |
+| 是否有可直接用的载荷 | **没有**，搜 `6.12.58` → `0 / 80 个机型` |
+| 能否现场构建一份 | **不能**，`boot.img` 读不到（见 §5） |
+| 能否替代现有的 Shizuku 方案 | **不能**（见 §6） |
+
+一句话：**这台机器的内核可能真的还带着洞，但 KSuRoot 手里没有配套的弹药，而造弹药要用的 `boot.img` 恰好又只有 root 才读得到。** 死锁。
+
+### 2. 项目与包的事实
+
+- APK：`KSuRoot-4.1.2.apk`，65,353,922 B，md5 `f6a0c8849fc5b57df21d03f13944623c`
+- 包名 `com.ting.root`，`versionName=4.1.2`，`versionCode=412`
+- 内含 **118 个** `libksu_*.so`，按厂商分布：
+
+| 厂商 | 数量 |
+|------|------|
+| vivo | 35 |
+| samsung | 29 |
+| google | 29 |
+| other（通用/兜底） | 11 |
+| mi | 6 |
+| **oppo** | **5** |
+| xiaomi | 1 |
+| realme | 1 |
+
+- 三个特殊库：`libionstack.so`（`payload-universal`）、`libcve43499root.so`（`payload-helper`）、`libbs.so`（`payload-vivo`）
+- **两套内核基线**：`libbaseline_6_1.so`、`libbaseline_6_12.so`——本机正好是 6.12 分支，构建通道是认这个的
+- `assets/hashes.json`（`schema: gl5x-integrity/1`）只对上述三个特殊库做 sha256 校验，**118 个机型载荷不在校验清单里**
+
+### 3. App 对本机的判定原文
+
+`主页` 最底部的「设备 / 固件」区块：
+
+| 字段 | 值 | 图标 |
+|------|-----|------|
+| 设备 | `OPPO OPPO A7 Pro Max 5G · OP620DL1` | 正常 |
+| 固件 | `PYC110_16.0.9.409(CN01)` | 正常 |
+| 系统 | `Android 16 (API 36)` | 正常 |
+| Android 安全补丁 | `2026-07-01` | **红色警告** |
+| 内核版本 | `6.12.58 · 支持 GhostLock 免 ADB` | 正常 |
+
+同时顶部横幅红字：**「安全补丁已合并幽灵锁修复，大概率无法正常使用」**。
+
+**它自己就是矛盾的**：内核行说「支持」，补丁行说「已修复」。按上游版本线 `6.12.58 < 6.12.86` 应判未修复；但 OPPO 很可能在 16.0.9.409 里回移了 futex PI 补丁而不动行级版本号——那样补丁日期这条更可信。**不读内核二进制无法定论**，这一点必须如实留作未决。
+
+机型识别路径也值得记：`ro.oppo.market.name` / `ro.product.marketname` / `ro.product.mod_device` 在本机**全为空**，App 是靠 `Build.MODEL`（`OP620DL1`）认出来的。这也解释了为什么它的匹配永远落不到本机。
+
+### 4. 载荷库覆盖：决定性证据
+
+App 内「内置提权载荷 · 覆盖机型」页自述：
+
+> 80 / 80 个机型；**其中 57 份载荷读不出内核版本 —— 只能手动选用，不会参与自动匹配**
+
+- 搜索框支持按内核版本搜，输入 `6.12.58` → **`0 / 80 个机型`**
+- OPPO 系搜索 `OPPO` → `5 / 80`，**五条全部「内核未知」**：
+
+| 机型 | 内核 | 体积 |
+|------|------|------|
+| OPPO A5 Pro 5G | 内核未知 | 221 kB |
+| OPPO PJA110 | 内核未知 | 145 kB |
+| OPPO PKJ110 | 内核未知 | 229 kB |
+| OPPO Reno2（PCKM00） | 内核未知 | 170 kB |
+| OPPO（天玑 MT6835 平台） | 内核未知 | 176 kB |
+
+- 反编译 dex：硬编码的内核版本只有 `6.1.115/145/157`、`6.6.30/46/57/89/98/102/118/127`、`6.12.23/30/38`，**没有 6.12.58**
+- dex 里搜不到 `malabar` / `SM4850` / `PYC110` 任何一个串
+
+**自动匹配 = 0 份。** 「一键提权」若不手动指定，本机没有任何一份是给它的。
+
+### 5. 两条通道同时断掉
+
+**通道 A：自动匹配** —— 0 份，已证。
+
+**通道 B：机内构建**（「载荷构建」页）：
+
+> 从本机 boot.img 里读出内核符号表，解析出提权链需要的偏移，再把选定的基础动态库改写成适配本机内核的版本……全程在设备上完成，不需要联网。
+
+这条路本来是真有希望的，但它要 `boot.img`，而：
+
+```
+boot_a        -> /dev/block/sde9
+init_boot_a   -> /dev/block/sde25
+vendor_boot_a -> /dev/block/sde19
+dd if=/dev/block/by-name/boot bs=1024 count=1  ->  0 bytes copied
+/sdcard 上无 OTA zip（只有 ota1~4.xml 元数据）
+/data/oplus/ota  adb shell 无权进入
+```
+
+**没 root 读不到 boot.img → 造不出匹配载荷 → 拿不到 root。** 闭环死锁，除非去下 5~8 GB 的完整官方固件包。
+
+### 6. 与这台机器六项待解问题的逐项比对
+
+| 问题 | KSuRoot 能否解决 | 理由 |
+|------|------------------|------|
+| 替代 Shizuku 当免 root shell | **不能** | KSuRoot 的目标是拿 uid 0，不是提供 shell 通道；且本机无匹配载荷。Shizuku 仍是唯一可用通道 |
+| 解决 ColorOS `am_freeze` 冻结 | **不能** | 冻结发生在框架层，要么进自启动/耗电白名单（已按附八做），要么有 root 去改。KSuRoot 拿不到 root |
+| 抑制 OAID 拉活 | **不能** | 同上游戏：要 root 才能直接改权限。现方案（附六脚本）已把它压到「每次复活只活几秒」 |
+| OTA「自己回前台」 | **不需要** | 已用 `am stack remove` 断根，见附六 §7.1 |
+| 绕过「BL 不可解锁」这道硬墙 | **理论上能**——这是它唯一真正有价值处 | GhostLock 是免 BL、免 fastboot、免 ADB 的内核提权，正好绕开解 BL 这条唯一正路。**但前提是内核有洞且载荷对得上**，本机两条都不满足 |
+| 当长期 root 管理器 | **不能** | 它是「一次性拿 root」的工具。长期用要交给 KernelSU / SukiSU Ultra，而这两者都要**解 BL + 刷 boot**。所以即使 KSuRoot 成功，也只是**每次开机重跑一次的临时 root** |
+
+最后一条最容易被忽略：**这不是"刷个 root"的替代品，是"每次重启都要重新打一次"的消耗品**。对一台每天要用的主力机，这个维护成本本身就是否决理由。
+
+### 7. 风险与局限
+
+1. **失败形态是内核态写错位置**。W1 改 `selinux_state.enforcing`、W2 改 `cred`、W3 摘 `seccomp`——全是内存态，不写磁盘。最坏通常是 panic 后自动重启；但本机刚实测过重启后 Shizuku 不一定自恢复（附六 §7.2），所以「重启一下就好了」这个安慰在这里不成立。
+2. **手动指定别机载荷 = 确定性失败**。偏移来自别的机型，`该动态库未引用 N 项偏移` 这类错误试一万次都是同一个位置，不是概率问题。
+3. **`hashes.json` 不覆盖 118 个机型载荷**。完整性校验只保护 3 个特殊库，机型载荷没有任何完整性约束——第三方打包的载荷被替换/篡改不会被发现。
+4. **它会常驻后台并在开机时活动**。对一个正在做「开机零手动 + OAID 抑制」的设备，多一个持有内核漏洞载荷的常驻包，与既有目标方向相反。
+5. **无官方支持渠道**。fork 自 Root-My-Galaxy + ghostlock-app，本机这类未收录机型出问题没有 upstream 可查。
+
+### 8. 本轮**没有做**的事，以及为什么
+
+**没有点「一键提权」，也没有手动指定别机载荷去跑。** 理由不是怕麻烦，是收益为零：0 匹配的前提下，点下去最好情况是报错，最坏情况是把别机偏移写进本机内核。而这一步换不来任何新信息——因为「有没有洞」这个真问题，靠跑载荷也回答不了（跑失败只能说明载荷不对，不能说明内核没洞）。
+
+要真回答「本机内核到底有没有这个洞」，只有一条正路：**拿到 `boot.img` 反汇编 `do_futex`，看 PGO/LTO 后的栈布局**。如前所述，这需要先 root 或先下完整固件。
+
+### 9. 设备现状与回滚
+
+实测全程只做了「安装 + 读界面 + 读 APK 内部文件」，未执行任何载荷：
+
+- 「运行记录」= **暂无运行记录**
+- 「移交 root」= **暂不可移交（未检测到 root）**
+
+随时可卸：
+
+```bash
+adb uninstall com.ting.root
+```
+
+保留的临时文件（`devices/.tmp/`，已在 `.gitignore` 里）：`KSuRoot-4.1.2.apk`、截图 `ksu1/k5/k6/ke.png`、dex 解包 `dx/`。
+
+---
+
+## 附八：ColorOS 后台放行 + 冻结器实测（第 10–13 次重启，2026-11-14 夜）
+
+承接附六 §7.2 的「Shizuku 自启是概率事件」。这轮把「ColorOS 自启动/后台放行」和「缓存冻结器」两件事一起做了对照实验。**结论是坏的：放行确实生效了，但没能改善自启可靠性。**
+
+### 1. 做了什么（可复现）
+
+三个包各两项，路径完全一致：
+
+```
+设置 → 应用 → 应用管理 → <包名> → 应用详情
+  ├─ 管理闲置应用            → 关闭
+  └─ 耗电管理 → 耗电行为控制  → 完全允许后台行为（弹窗再点「允许」）
+```
+
+| 包 | 管理闲置应用 | 耗电行为控制 | 备注 |
+|----|-------------|-------------|------|
+| `moe.shizuku.privileged.api` | 由「开启」改为 **关闭** | 由「智能优化」改为 **完全允许后台行为** | 必须改 |
+| `com.termux` | 本来已是关闭 | 改为 **完全允许后台行为** | |
+| `com.termux.boot` | 本来已是关闭 | 改为 **完全允许后台行为** | 开机脚本实际执行者，最容易被漏掉 |
+
+另外全局关掉缓存冻结器：
+
+```bash
+adb shell settings put global cached_apps_freezer disabled
+# 改前为 null（=默认启用）；框架侧 freezer_cutoff_adj=900
+```
+
+### 2. 「自启动管理」列表打不开——三重拒绝
+
+```bash
+adb shell am start -n com.oplus.battery/com.oplus.startupapp.view.StartupAppListActivity
+# SecurityException: requires oplus.permission.OPLUS_COMPONENT_SAFE  (mCallingUid=2000)
+```
+
+同目录下另外三个入口（`OptimizationAutoStartActivity` / `AssociateStartActivity` / `PreventRecordActivity`）**同一个异常**。`rish` 也是 uid 2000，一样没这个签名权限。
+
+数据侧也堵：`com.oplus.battery/com.oplus.startupapp.data.StartupProvider` 未常驻时不显示 authority，`content query` 连不上。
+
+**不过这条其实不必需**——见 §5：接收器每轮都 fire 了，说明自启动从来没拦过。
+
+### 3. 第 10 次重启（21:09:42）：放行全套生效，仍然失败，但抓到了真正的失败形态
+
+| 时刻 | 事件 |
+|------|------|
+| 21:10:02.948 | `am_proc_start` Shizuku `BootCompleteReceiver`（`callingUid=1000, LOCKED_BOOT_COMPLETED`）→ **自启动没拦** |
+| 21:10:09.436 | `am_proc_start` `com.termux.boot` `BootReceiver`（`callingUid=1000, BOOT_COMPLETED`）|
+| 21:10:11.638 | `com.termux` `TermuxService` 由 `com.termux.boot` 拉起 → **Termux 那条链完好** |
+| 21:10:44.397 | `AndroidRuntime: Calling main entry rikka.shizuku.shell.ShizukuShellLoader` → **starter 真的跑了** |
+| 21:10:44.422 | `ActivityManager: sync unfroze 9170 moe.shizuku.privileged.api for 3` |
+| 21:10:44.425 / .426 / .433 | `Async freezing` / `Cancel freezing` 反复抖动 |
+| 21:10:44.436 | `ShizukuManager: Binder not received or Shizuku service not running` |
+| 21:10:44.441 | `app_process: System.exit called, status: 1` → **starter 放弃** |
+| 21:10:54.444 | `ActivityManager: freezing 9170` → 最终冻结 |
+
+**starter 从启动到放弃只有 250 毫秒**，而同步解冻窗口固定只有 3 秒。看起来像握手被冻结打断。
+
+### 4. 第 11–13 次重启：关掉冻结器后逐轮对照
+
+先验证「关闭」是真的被框架接受，而不是只写进了 settings：
+
+```
+改动后整轮 grep -cE 'Async freezing|freezing [0-9]+'  →  0
+```
+
+上一轮同一 boot 内是密集抖动。**冻结确实停用了。**
+
+| 次序 | 时刻 | 冻结器 | 脚本侧结果 | 判定 |
+|------|------|--------|-----------|------|
+| 第 10 次 | 21:10:12 | 开 | 无 `rish ready` | **失败** |
+| 第 11 次 | 21:14:26 | 关 | `rish ready (attempt 0, 等待 1s)` @21:14:27 | **成功** |
+| 第 12 次 | 21:16:22 | 关 | 无 `rish ready`（自动路径失败；+233s 才起来） | **失败** |
+| 第 13 次 | 21:20:51 | 关 | `rish ready (attempt 0, 等待 3s)` @21:20:54 | **成功** |
+
+第 12 次的失败形态和第 10 次一模一样，但**这次没有任何冻结事件**：
+
+```
+21:17:41.398  10826  Calling main entry rikka.shizuku.shell.ShizukuShellLoader
+21:17:41.429   9017  ShizukuManager: Binder not received or Shizuku service not running
+21:17:41.435  10826  app_process: System.exit called, status: 1     ← 31 毫秒
+21:17:56.997  10922  （15 秒后重试，同样 27 毫秒 exit 1）
+```
+
+### 5. 结论（必须说清的三条）
+
+1. **放行三项 + 关冻结器都真实生效了**（单选状态、`cached_apps_freezer=disabled`、冻结计数 0，三重可验证）。
+2. **但没有可测的改善**：冻结器关闭后 3 次里 2 次成功；此前基线是 9 次里 8 次成功。样本太小，只能说「不显著」，不能声称改善——**更不能声称它把问题解决了**。
+3. **根因既不是 ColorOS 冻结，也不是自启动拦截**。冻结计数为 0 的那一轮同样失败，且失败发生在 30 毫秒内——30 毫秒不是超时，是握手直接报错。真凶是 **Shizuku 自身 starter 握手在这台机器上不稳定**，与 ColorOS 的省电策略无关。
+
+### 6. 仍然值得保留的两点
+
+- **冻结归零有独立价值**：第 9 次那种「起来 37 秒被冻 → rish 每 15 秒 `unfreeze for 3` → 永久卡死」的形态，在本轮 4 次开机中一次都没再出现。也就是说它治不了「起不来」，但能治「起来之后被冻死」。
+- **兜底成本已经量化**：手动补救 = 解锁 → 打开 Shizuku → 点「启动」，**实测约 4 秒**，成功率 100%（本轮验证：点击后 `rish -c id` 返回 `uid=2000(shell)`）。
+
+### 7. 代价与回滚
+
+代价：缓存应用不再被冻结，常驻内存上升。实测第 11 次开机 98 秒时 `MemAvailable 7,516,280 kB / MemTotal 11,760,876 kB`——余量仍然充裕，但这是「用户感知不到、电量感知得到」的那类代价。
+
+```bash
+# 恢复冻结器（默认行为）
+adb shell settings put global cached_apps_freezer null
+
+# 三项放行回滚（逐包进应用详情改回）
+#   管理闲置应用 → 开启
+#   耗电行为控制 → 智能优化后台运行（推荐）
+```
+
+### 8. 一个方法论教训：`pidof shizuku_server` 是坏指标
+
+第 11 次开机，Termux 脚本在 **21:14:27** 就打出 `rish ready (attempt 0, 等待 1s)`，而我的观测器用 `pidof shizuku_server` 直到 **21:15:12** 才看到进程——差了 45 秒。若只用 `pidof` 判定，会把一次成功误判成失败。
+
+**可靠判据只有两个**：`rish -c "id"` 的返回、或脚本自己的 `boot-oaid.log`。这和附六 §7.2 里 `service.adb.tls.port` 那次误判是同一类错误——**别信间接指标**。
