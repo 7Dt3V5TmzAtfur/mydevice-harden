@@ -1327,7 +1327,7 @@ pm default-state --user 0 com.heytap.market  # → enabled=0（真正出厂态�
 | # | 任务 | 结果 | 一句话 |
 |---|------|------|--------|
 | ① | 清 Opex + 继续砍广告 | ✅ | Opex 状态位本来就是 0；广告键 13 个里 8 个本就为 0，改了 5 个 + 撤 3 处权限 |
-| ② | OAID 归零 | ⚠️ 部分 | 只能做到「系统拒绝启动」，无法禁用/卸载（保护名单，同 OTA） |
+| ② | OAID 归零 | ⚠️ 部分 | 无法禁用/卸载（保护名单，同 OTA）；挂起只挡 UI 不挡 binder，只能做到「默认不运行」 |
 | ③ | 一键复原脚本 | ✅ | `scripts/apply-tier2.sh` + `scripts/rollback.sh`，全量可逆，含 dry-run |
 | ④ | 重启回归验证 | ✅ | 22 禁用 / 12 挂起 / 设置项全部持久；Shizuku 重启后**自动**起来了 |
 
@@ -1354,27 +1354,40 @@ pm default-state --user 0 com.heytap.market  # → enabled=0（真正出厂态�
 
 这说明 `pm suspend` 在系统层面确实把它拦死了（不是「看起来没跑」），OAID 请求会被系统拒绝。
 
-**但挂起挡不住「按需唤醒」**，两个证据：
+**但挂起只挡 UI，不挡 binder**——这是本轮最关键的一次自我推翻：
 
-```
-# ① 重启后它自己起来了（挂起标志在设置里，但进程启动比标志生效更早）
-重启后 ps → 6534 com.heytap.openid   （重启前是 21418）
+| 观察 | 命令 | 结果 |
+|------|------|------|
+| 重启后它自己起来了 | `ps -A \| grep openid` | PID 6534（重启前 21418） |
+| 一次 content 查询就唤醒 | `content query --uri content://com.oplus.omes.ids_provider` | 进程 0 → 11257 |
+| **provider 仍在服务** | `dumpsys activity providers \| grep ids_provider` | `proc=ProcessRecord{...:com.heytap.openid}`、`authority=com.oplus.omes.ids_provider` 已发布 |
+| **有人绑着 IdentifyService** | `dumpsys activity services com.heytap.openid` | 2 条 `ConnectionRecord ... .IdentifyService flags=0x1`，宿主是 `c:com.nearme.instant.platform` |
 
-# ② 一次 content 查询就把它唤醒
-adb shell content query --uri content://com.oplus.omes.ids_provider
-→ 进程从 0 变 11257
-```
+也就是说：`SuspendedAppActivity` 只证明「**Activity 起不来**」，并不证明「**取不到 ID**」。
+SDK 走的是 `bindService(.IdentifyService)` 或 `ContentResolver.query(ids_provider)`，这两条路挂起拦不住。
+当时的进程是被**快应用平台**（`com.nearme.instant.platform`，本身也在挂起名单里）的残留 binder 连接吊着的。
 
-`am force-stop` 之后 60 秒观察，**没有再自启**（进程数 0）。所以实际可用的方案是：
+**干净杀法（实测有效）**：把「客户端」和「服务端」一起杀，否则客户端不放连接，进程会被重新拉起。
 
 ```bash
-# 每次开机后执行一次（或写进 Tasker / 开机脚本）
 adb shell am force-stop com.heytap.openid
+adb shell am force-stop com.nearme.instant.platform   # 关键：不放它的连接，openid 就会被吊回来
 ```
 
-**诚实结论**：无 root 情况下，OAID **做不到真正归零**，只能做到「默认状态下不可用、被查询时可能被唤醒」。
-要做到恒定全零，只能靠 ColorOS 设置里的官方开关或 root 改 provider。代价：个别三方 SDK 拿不到 OAID
-会返回 null 或走超时分支（多数 SDK 有兜底，实测软件商店首页仍正常加载）。
+实测结果（T+ 为 force-stop 之后的时间）：
+
+```
+T+15s : openid=0  instant=0
+T+30s : openid=0  instant=0
+T+60s : openid=0  instant=0
+T+120s: openid=0  instant=0
+provider 是否重新发布: 0（即 ids_provider 不再出现在 published 列表里）
+```
+
+**诚实结论**：无 root 情况下 OAID **做不到恒定归零**。能做的是「默认不运行、provider 未发布」，
+但任何一个持有旧 binder 连接或主动 query 的应用都可能把它拉回来，**拉回来之后就取得到 ID**。
+所以这条只能算「降低」，不能算「关闭」；要真正归零只能靠 ColorOS 设置里的官方开关或 root 改 provider。
+代价：个别三方 SDK 拿不到 OAID 会返回 null 或走超时分支（多数有兜底，实测软件商店首页仍正常加载）。
 
 ### 3. 广告/推荐开关：13 个键里 8 个本来就是 0
 

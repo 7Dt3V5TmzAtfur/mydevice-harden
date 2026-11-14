@@ -132,7 +132,13 @@ say "3. force-stop 全部处理过的包"
 for p in "${DISABLE[@]}" "${SUSPEND[@]}" "${REMOVE[@]}"; do
   run am force-stop "$p"
 done
-echo "  done"
+# 关键: com.nearme.instant.platform(快应用平台) 会用残留 binder 连接把
+# com.heytap.openid 吊回来(实测: 两分钟内不死)，必须补一轮「客户端+服务端」同杀。
+# 判定是否干净: dumpsys activity providers | grep -c ids_provider 应为 0。
+for p in com.heytap.openid com.nearme.instant.platform; do
+  run am force-stop "$p"
+done
+echo "  done（openid 需与 instant.platform 同杀，否则被 binder 吊回）"
 
 # -----------------------------------------------------------------------------
 # 4. 撤销敏感权限（定位/通知）
