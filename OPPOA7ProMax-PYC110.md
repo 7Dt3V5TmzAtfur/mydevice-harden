@@ -2368,3 +2368,70 @@ adb shell "dumpsys activity providers | grep -c ids_provider"  # 0
 1. **`20min×30s` 参数本身是对的**，不是之前失败的原因。之前失败全是 Termux 被 `o-stop` 切断（见 §9）。
 2. **窗口余量不足**，实测只剩 1 分半。要么把阶段 2 从 40 轮扩到 60 轮（+10 分钟），要么接受"偶尔漏掉 T+30min 之后的复活"。
 3. **本轮不是零手动**：人工点了 1 次「启动」。所以这一轮验证的是"脚本链路 + 参数"，不是"零手动"。
+
+## 附九：单项恢复——把某个应用还给我（2026-11-14 夜）
+
+加固是批量做的（`apply-tier2.sh` / `apply-tier3.sh`），但**实际使用中往往是单独某个应用需要恢复**。整脚本回滚会把 20 多项一起还原，代价太大。这一节记单项恢复的通路。
+
+### 1. 本次要恢复的：自带浏览器
+
+排查结果：`com.heytap.browser`（OPPO 浏览器 v40.10.14.9）**只是被挂起，没被禁用**：
+
+```
+User 0: ... suspended=true ... enabled=0 ...
+```
+
+`enabled=0`（DEFAULT）说明它本来就能启动，卡在 `pm suspend` 这一步。这与附五 §2 里 openid 的结论互相印证——**挂起挡的是 UI 入口，不挡进程**，但对浏览器这种"从桌面图标启动"的应用，挡 UI 就等于不可用。
+
+### 2. 恢复动作与验证
+
+```bash
+adb shell "pm unsuspend --user 0 com.heytap.browser"
+adb shell "pm enable    --user 0 com.heytap.browser"
+```
+
+四项验证（缺一项都不算成功）：
+
+| 检查 | 结果 |
+|------|------|
+| `dumpsys package` 的 `User 0:` 行 | `suspended=false enabled=1` |
+| `monkey -p com.heytap.browser -c android.intent.category.LAUNCHER 1` | `Events injected: 1` |
+| `pidof com.heytap.browser` | `13037`（重启应用后为 `13913`） |
+| `dumpsys window \| grep mCurrentFocus` | `com.heytap.browser/com.android.browser.BrowserActivity` |
+| logcat 里的 FATAL / AndroidRuntime | **空** |
+
+另查 WebView 提供方没被牵连：`dumpsys webviewupdate` → `com.google.android.webview 138.0.7204.179`。截图确认首页完整渲染（搜索框、快捷入口、底栏五个 tab、Wi-Fi 在线），不是空白页也不是"应用不可用"系统弹窗。
+
+### 3. 新增 `scripts/restore-package.sh`
+
+```bash
+./scripts/restore-package.sh com.heytap.browser
+./scripts/restore-package.sh com.heytap.browser com.coloros.alarmclock
+```
+
+每个包依次做：`pm unsuspend` → `pm enable` → 回读 `suspended=`/`enabled=` 两个字段断言 → `monkey` 拉起 → 打印进程与前台窗口。任一包仍为 `suspended=true` 或 `enabled=3` 时脚本以非 0 退出。
+
+### 4. 恢复后这台机器上的存量（2026-11-14 22:48 快照）
+
+仍被挂起的 12 个（原 13 个，浏览器已移出）：
+
+```
+com.heytap.pictorial      com.oplus.themestore     com.oplus.romupdate
+com.heytap.openid         com.oplus.pantanal.ums    com.coloros.assistantscreen
+com.opos.ads              com.heytap.tas            com.heytap.quicksearchbox
+com.nearme.instant.platform  com.oplus.cota         com.heytap.htms
+```
+
+仍被禁用的 21 个（`enabled=3`）：`com.heytap.cloud`、`com.mobiletools.systemhelper`、`com.oplus.onetrace`、`com.oplus.logtrial`、`com.oplus.qualityprotect`、`com.oplus.apprecover`、`com.oplus.nas`、`com.oplus.nhs`、`com.oplus.vdc`、`com.coloros.regservice`、`com.heytap.speechassist`、`com.coloros.digitalwellbeing`、`com.qualcomm.qti.devicestatisticsservice`、`com.oplus.metis`、`com.oplus.stdsp`、`com.oplus.sauhelper`、`com.oplus.ovoicemanager.wakeup`、`com.oplus.thirdkit`、`com.oplus.obrain`、`com.coloros.remoteguardservice`、`com.oplus.ovoicemanager`。
+
+一次性列出（不用一条条 `dumpsys package`）：
+
+```bash
+adb shell "dumpsys package | awk '/^  Package \[/{p=\$2} /User 0:.*suspended=true/{print p}'"   # 挂起的
+adb shell "dumpsys package | awk '/^  Package \[/{p=\$2} /User 0:.*enabled=3/{print p}'"        # 禁用的
+```
+
+### 5. 一个必须记住的坑
+
+**重跑 `apply-tier2.sh` 会把浏览器再次挂起。** 那个脚本是幂等的，不存在"跳过已恢复的包"这种逻辑。所以要长期保留某个应用，就别整脚本重放；要重放就先把它从脚本的挂起名单里删掉。
+
