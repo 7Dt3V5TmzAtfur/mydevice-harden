@@ -977,6 +977,10 @@ WiFi/移动网络实测正常（`ping 223.5.5.5` 0% loss，`dumpsys connectivity
 关键结论：**组件级 `pm disable` 也会被拦**，而且抛的是 `SecurityException` 而不是静默 `default`
 ——说明 OTA 三包在 system_server 里有一张显式保护名单，连"改组件状态"这个更细的入口都堵了。
 
+> ⚠️ **本节结论已于 2026-11-14 晚续被修正两处，详见「附四」第 4、6 节：**
+> 1. `cmd appops set <pkg> RUN_IN_BACKGROUND ignore` 对系统 app **拦不住**——复查时 `com.oplus.sau`(PID 31698)、`com.oplus.olc`(PID 12254) 照旧在跑，appops 读回确实是 `ignore` 但系统 app 不受约束。当时「force-stop 后 20 秒进程数恒为 0」只是 20 秒的观测窗口，不是结论。
+> 2. `am set-standby-bucket <pkg> restricted` 之后 `get-standby-bucket` 回读的 `5` **不是最严，而是 `EXEMPTED`（最宽松）**。桶值语义：`5=EXEMPTED, 10=ACTIVE, 20=WORKING_SET, 30=FREQUENT, 40=RARE, 45=RESTRICTED`。且只要包在 `deviceidle whitelist` 里，桶会被强制成 5，此时设 restricted 完全无效。
+
 所以 OTA 走"绕"而不是"关"：
 
 ```bash
@@ -1024,4 +1028,257 @@ cmd deviceidle whitelist +<pkg>
 
 # 恢复已卸载的（保留 enabled 状态，恢复后可能还要 pm enable）
 pm install-existing --user 0 <pkg>
+```
+
+---
+
+## 附四：免电脑启动 Shizuku + 运营商云控清算 + OTA 硬墙（2026-11-14 晚续）
+
+### 1. 本轮三件事的完成度
+
+| # | 诉求 | 结果 |
+|---|---|---|
+| ① | 重启后进 Shizuku 点一下就能启动，不用配对 | ✅ 已配对成功并实测；**唯一硬限制：手机必须连着 WiFi** |
+| ② | 查运营商云控、隐私上传并处理 | ✅ 又揪出 **移动** 的 `com.coloros.regservice`（论文点名、上传已装应用列表）+ 6 个统计/快应用包，全部处理 |
+| ③ | 压掉「检测到新版本」和「系统文件更新」 | ⚠️ 部分。自动下载/夜间更新早已关；但**「检查」这一步在免 root 下切不断**，原因见第 6 节（三条路全被系统锁死） |
+
+### 2. Shizuku 重启后「点一下启动」——已落地
+
+#### 2.1 先接受一个事实
+
+Shizuku 在 **adb 模式**下服务端是 `shell` 用户的普通进程（`PPID 1`），**重启必然死掉**。
+真正免手动只有 root 模式。所以目标只能是：**重启后不开电脑、不用再配对，在手机上点一下就能拉起**。
+这就是「无线调试启动」这条路线。
+
+#### 2.2 一次性配对（只需做一次，之后永久记住）
+
+```bash
+# 前置：给 Shizuku 通知权限（配对码是在通知里的 RemoteInput 输入的，没权限弹不出来）
+pm grant moe.shizuku.privileged.api android.permission.POST_NOTIFICATIONS
+cmd appops set moe.shizuku.privileged.api POST_NOTIFICATION allow
+```
+
+手机上的操作顺序（教程页会一步一步指路）：
+
+1. Shizuku 主页 →「通过无线调试启动」卡片 →「配对」
+2. 教程页点「开发者选项」→ 找到「无线调试」（**点行的左侧**进子页面，不是点右边开关）
+3. 子页面点「使用配对码配对设备」→ 得到一个**六位码 + 配对端口**
+4. 下拉通知栏 → Shizuku 的通知「已找到配对服务」→ 点「输入配对码」→ 输入六位码 →「发送」
+5. 通知变成「**配对成功 / 您现在可以启动 Shizuku 服务了**」
+
+实测那一次：配对码 `406815`、配对端口 `42633`、连接端口 `192.168.50.170:34005`。
+**端口每次开关无线调试都会变，配对码也每次不同**，但配对结果一次就够。
+
+配对后 Shizuku 主页的按钮从「配对」变成「**启动**」（`Shizuku未运行` 状态下「配对」和「启动」会同时出现，点下面那个「启动」）。
+
+#### 2.3 实测三种场景
+
+| 场景 | 结果 | 证据 |
+|---|---|---|
+| WiFi 已连 + 无线调试**开** | ✅ 点「启动」2 秒内起来 | `shizuku_server 17411 shell PPID 1` |
+| WiFi 已连 + 无线调试**关**（`adb_wifi_enabled=0`） | ✅ **Shizuku 自己把无线调试打开了**，2 秒内起来 | 点完读回 `adb_wifi_enabled=1`，`shizuku_server` 已在 |
+| WiFi **关**（只插卡/只用流量） | ❌ 起不来，界面提示「正在搜索无线调试服务」 | 14 秒内 7 次采样进程数恒为 0 |
+
+第二行是这轮最有价值的发现：Shizuku 拿到 `WRITE_SECURE_SETTINGS` 之后，**会自己把 `adb_wifi_enabled` 写回 1**，
+所以用户不需要先进开发者选项开无线调试，点一下「启动」就全自动。
+
+第三行是真限制，日志写得很直白：
+
+```
+AdbDebuggingManager: Network disconnected. Disabling adbwifi.
+AdbDebuggingManager: Not connected to any wireless network. Not enabling adbwifi.
+```
+
+**无线调试只能走 WiFi，没有 WiFi 就没有本机自助启动。** 出门只用流量的场景下无解（除非换 root）。
+
+#### 2.4 网络一变，无线调试会被系统自动关掉
+
+```
+adb shell settings get global adb_wifi_enabled    # 断网后自动变 0，恢复 WiFi 也不会自己变回来
+adb shell settings put global adb_wifi_enabled 1  # 需要手动置 1 才重建监听端口
+```
+
+界面上那句提示说得很准：「当网络变化时『无线调试』会被自动禁用」。
+不过按 2.3 第二行，**只要点一下「启动」就不用管这个**。
+
+#### 2.5 顺手做的：别让 ColorOS 后台杀掉它
+
+```bash
+for p in moe.shizuku.privileged.api com.aistra.hail; do
+  dumpsys deviceidle whitelist +$p
+  cmd appops set $p RUN_IN_BACKGROUND allow
+done
+```
+
+### 3. 本轮踩的坑
+
+| 坑 | 现象 | 解法 |
+|---|---|---|
+| Git Bash 路径转换 | `adb shell uiautomator dump /sdcard/x.xml` 变成 `D:/software/.../sdcard/x.xml`，pull 报 No such file | `export MSYS_NO_PATHCONV=1` |
+| `$` 被设备端 shell 吃掉 | `am start -n com.android.settings/.Settings$DataUsageSummaryActivity` 落到 `.Settings` | 整体用单引号并转义：`'am start -n com.android.settings/.Settings\$DataUsageSummaryActivity'` |
+| Shizuku 主 Activity 名字 | `moe.shizuku.privileged.api/.MainActivity` 启动无效，停在桌面 | 实际是 `moe.shizuku.manager.MainActivity`，用 `monkey -p moe.shizuku.privileged.api -c android.intent.category.LAUNCHER 1` |
+| uiautomator 报「已 dump 到」但 pull 不到 | 同第一条，路径被改写 | 同上 |
+| 配对通知不出现 | 只有一句「请允许 Shizuku 发布通知」 | 先 `pm grant POST_NOTIFICATIONS` |
+
+### 4. 纠正：`standby bucket` 的 5 不是「最严」，是最宽
+
+这是上一轮留下的一个误读，得改掉。Android 的桶值：
+
+```
+5  = EXEMPTED（豁免，最宽松）    10 = ACTIVE
+20 = WORKING_SET                 30 = FREQUENT
+40 = RARE                        45 = RESTRICTED（最严）
+```
+
+两条实测结论：
+
+- `am get-standby-bucket <pkg>` 在这台机器上**不可信**：无论设 `active` 还是 `restricted`，读回**恒为 5**。
+  真正的桶要去 `dumpsys usagestats` 里看 `STANDBY_BUCKET_CHANGED` 事件。
+- 一旦把包加进 `dumpsys deviceidle whitelist`，它的桶会被强制成 `EXEMPTED(5)`，此时再 `set-standby-bucket restricted` **完全无效**。
+  所以顺序必须是「先移出白名单，再设桶」。
+- 更要紧的是：**`cmd appops set <pkg> RUN_IN_BACKGROUND ignore` 对系统 app 根本拦不住。**
+  本轮复查时 `com.oplus.sau`（PID 31698）和 `com.oplus.olc`（PID 12254）**照样在跑**，
+  appops 读回确实是 `ignore`，但系统 app 不受这个 op 约束。
+  上一轮「force-stop 后 20 秒进程数恒为 0」只是 20 秒的窗口，不是结论。
+
+### 5. 运营商云控：又揪出一个「移动版 SystemHelper」
+
+#### 5.1 上一轮拆掉的联通组件，这次拿到了双来源印证
+
+`com.mobiletools.systemhelper`（我在本机拆的是 `4.0.0-20260609`，`/product/priv-app/SystemHelper-release-20260609/`）：
+公开的逆向分析（吾爱破解）和 2023 年爱丁堡大学的论文《Android OS Privacy Under the Loupe》指向同一结论——
+**中国联通的 OMA-DM 终端管理组件**，位于 `priv-app`，无图标，上报 `dm.wo.com.cn`。
+
+它采集的范围和本机反编译看到的权限清单逐条对得上：
+
+| 数据 | 对应权限 |
+|---|---|
+| 过去 24h 每个 App 的使用时长与流量 | `PACKAGE_USAGE_STATS` |
+| 双卡 IMEI / IMSI / ICCID | `READ_PRIVILEGED_PHONE_STATE` |
+| WiFi BSSID、蓝牙 MAC | `ACCESS_WIFI_STATE` / `BLUETOOTH` |
+| 经纬度（内置定位 SDK）、基站 CID/TAC/PCI | `ACCESS_BACKGROUND_LOCATION` |
+| 已安装应用全量 | `QUERY_ALL_PACKAGES` |
+
+最要命的一条是**同意机制**：它只检查系统的 `device_provisioned`（开机向导有没有走完），
+换句话说**你激活手机那一刻就算同意了，系统里没有「拒绝」这个按钮**。
+
+#### 5.2 新发现：`com.coloros.regservice` —— 中国移动的同类组件
+
+论文里写得很明白：中国版固件会给**移动**也上报一份，域名 `a.fxltsl.com`，
+其中一个接口 `https://a.fxltsl.com/accept/sdkService` 连**已安装应用列表**都传；
+ColorOS（一加 / realme / OPPO）上的包名就是 `com.coloros.regservice`（小米侧叫 `com.miui.dmregservice`）。
+
+本机查证：
+
+```
+package:/product/app/RegService/RegService.apk     versionName=16.0.20
+PACKAGE_USAGE_STATS: granted=true
+READ_PRIVILEGED_PHONE_STATE: granted=true
+QUERY_ALL_PACKAGES: granted=true
+ACCESS_BACKGROUND_LOCATION（清单声明）
+cmd package resolve-activity --brief com.coloros.regservice → No activity found   # 无 UI，纯后台
+```
+
+处理：
+
+```bash
+pm disable-user --user 0 com.coloros.regservice     # → enabled=3，进程随即退出
+```
+
+#### 5.3 天气服务默认拿后台定位，定期上传 GPS
+
+论文点名 `com.coloros.weather.service` 与高德 SDK 会**默认**拿 `ACCESS_BACKGROUND_LOCATION`，
+把加密后的经纬度连同 OAID 定期发到 OPPO 服务器（约每天 5 次）。
+本机复核，两个权限都是 `GRANTED_BY_DEFAULT` + `RESTRICTION_SYSTEM_EXEMPT`：
+
+```bash
+pm revoke com.coloros.weather.service android.permission.ACCESS_BACKGROUND_LOCATION
+pm revoke com.coloros.weather.service android.permission.ACCESS_FINE_LOCATION
+# 复核：两项均 granted=false
+```
+
+温度/天气本身还能看，只是不再自动定位（需要时手动加城市）。
+`com.oplus.location`（系统定位核心）**没动**，GPS 框架正常。
+
+#### 5.4 另外处理掉的统计 / 快应用 / 广告包
+
+| 包 | 是什么 | 处置 | 复核 |
+|---|---|---|---|
+| `com.oplus.pantanal.ums` | OPPO 用户统计上报（`/product/priv-app/UMS/`），`QUERY_ALL_PACKAGES` | 停用 | `suspended=true`，进程已退 |
+| `com.nearme.instant.platform` | 快应用平台，**`READ_SMS` + `PACKAGE_USAGE_STATS` + `READ_PRIVILEGED_PHONE_STATE` + `ACCESS_FINE_LOCATION`** | 停用 | `suspended=true`，进程已退 |
+| `com.oppo.instant.local.service` | 快应用本地服务 | `pm disable-user` | `enabled=3` |
+| `com.qualcomm.qti.devicestatisticsservice` | 高通设备统计，`READ_PRIVILEGED_PHONE_STATE` | `pm disable-user` | `enabled=3` |
+| `com.heytap.pictorial` | 锁屏杂志（广告位），`READ_PRIVILEGED_PHONE_STATE` | 停用 | `suspended=true` |
+| `com.heytap.tas`（TasWallet） | 钱包/交通卡框架，带**后台定位** + `READ_PRIVILEGED_PHONE_STATE` | **没禁**（本机有 NFC，可能管交通卡），只撤定位 | 两项 `granted=false` |
+| `com.heytap.openid` | OAID / 设备标识下发 | 只 force-stop，未禁用 | 禁用会让部分三方 SDK 拿不到 OAID，风险自定 |
+
+注意 `pm disable-user` 在 ColorOS 上并不总是真禁用：对 `pantanal.ums` / `pictorial` / `nearme.instant.platform`
+它回的是 `new state: default`，但包状态变成 **`suspended=true`**——系统把「禁用」改成了「挂起」。
+挂起同样能挡住启动，但要**再补一刀 `am force-stop`**，否则原来的进程会赖着不走（本轮实测三个都在跑，强停后才退干净）。
+
+#### 5.5 处理后的整体状态
+
+```
+pm list packages -d   → 19 个
+网络                  → ping 223.5.5.5  0% loss
+蜂窝                  → mVoiceRegState=OUT_OF_SERVICE（本机没插 SIM 卡，与本次改动无关）
+定位                  → Location Providers 正常，network provider 有 last location
+Shizuku               → shizuku_server 18062 shell PPID 1
+regservice / pantanal / instant / pictorial 进程 → 全部为 0
+```
+
+### 6. OTA：三条路全被锁死，这是硬墙
+
+「设置里还能看到并检测出最新版本」这件事，本轮把能想到的路都试完了，逐条记录：
+
+| 尝试 | 结果 | 说明 |
+|---|---|---|
+| `pm disable-user --user 0 com.oplus.ota` | `new state: default` | 静默拒绝，状态仍是 `enabled=0` |
+| `pm disable --user 0 com.oplus.ota` | `SecurityException: Shell cannot change component state for null to 2` | 注意是 **for null**，包名在 PMS 里被直接抹成 null |
+| `pm suspend --user 0 com.oplus.ota` | `new suspended state: false` | 接受调用但立刻回 false |
+| `pm revoke com.oplus.ota android.permission.INTERNET` | `SecurityException: ... is not a changeable permission type` | INTERNET 是 normal 权限，不可撤 |
+| `cmd appops set com.oplus.ota POST_NOTIFICATION ignore` | 读回仍是 `allow` | 写入被无视（同批 `com.oplus.apprecover` 能写进去，说明是名单保护） |
+| 设置 → 通知管理 → 软件更新 →「允许通知」 | 开关**灰化** | 节点属性 `enabled=false clickable=false`，UI 上就是不让关 |
+| 设置 → 流量管理 → 应用联网管理 → 软件更新 | 只有「WLAN 与移动数据」「WLAN」两项 | **没有「禁用网络」**（用户 App 有四项含「禁用网络」，系统 App 被砍掉两项） |
+| `settings put secure com.oplus.ota.detected_status 0` | 成功，但**只是缓存** | 一打开「软件更新」页就重新联网检测，又变回「发现新版本 PYC110_16.0.9.420｜764.52 MB」 |
+| `settings put secure com.oplus.ota.starting_line 9999999999999`（把版本水位推到未来） | 无效 | 页面照样显示新版本，已还原为原值 `1794630228227` |
+
+所以「系统文件更新」和「检查更新」这两件事，**免 root 下切不断**，原因不是没找到开关，而是：
+
+1. 包在 system_server 的硬保护名单里（连组件级 `pm disable` 都抛异常）；
+2. 通知开关被 UI 灰化 + AppOps 写入无效；
+3. 联网管理对系统 App 不给「禁用网络」这一项。
+
+**能做到的（已确认）**：
+
+```
+settings get global ota_disable_automatic_update → 1   # 不自动下载
+settings get global can_update_at_night          → 0   # 不夜间更新
+settings get secure oplus_custom_ota_dot_on_launcher → 0  # 桌面不点红点
+settings get secure com.oplus.ota.detected_status → 0   # 已清（临时）
+```
+
+也就是说：**它检测得出来，但下不了、装不上、也不弹**。真正的「看不见」得靠 root 删包，或者出厂固件层面处理。
+
+### 7. 本轮回滚
+
+```bash
+# 恢复本轮禁用的包
+for p in com.coloros.regservice com.oppo.instant.local.service com.qualcomm.qti.devicestatisticsservice; do
+  pm enable --user 0 $p
+done
+# 恢复被系统改成「挂起」的三个
+for p in com.oplus.pantanal.ums com.heytap.pictorial com.nearme.instant.platform; do
+  pm unsuspend --user 0 $p
+done
+
+# 恢复定位权限
+pm grant com.coloros.weather.service android.permission.ACCESS_FINE_LOCATION
+pm grant com.coloros.weather.service android.permission.ACCESS_BACKGROUND_LOCATION
+pm grant com.heytap.tas android.permission.ACCESS_FINE_LOCATION
+pm grant com.heytap.tas android.permission.ACCESS_BACKGROUND_LOCATION
+
+# 恢复本轮清的 OTA 状态位（原值）
+settings put secure com.oplus.ota.detected_status 1
+settings put secure com.oplus.ota.starting_line 1794630228227
 ```
